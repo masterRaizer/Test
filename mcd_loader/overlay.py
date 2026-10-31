@@ -22,6 +22,7 @@ LOCATIONS = {"inventory": "Инвентарь", "chest": "Сундук"}
 SLOT_NAMES = {"MeleeGear": "Ближнее", "RangedGear": "Дальнее", "ArmorGear": "Броня",
               "HotbarSlot1": "Артефакт 1", "HotbarSlot2": "Артефакт 2", "HotbarSlot3": "Артефакт 3"}
 FILTERS = ["Все", "Надетые", "Инвентарь", "Сундук"]
+PROPS_MIN_ROWS, PROPS_MAX_ROWS = 6, 8
 
 
 def _int(var, default=0):
@@ -692,8 +693,8 @@ class LoaderApp:
         ttk.Spinbox(gild_row, from_=0, to=3, textvariable=self.gild_lvl, width=3).pack(side="left", padx=4)
 
         ttk.Label(col_a, text="Свойства брони", style="CardMuted.TLabel").pack(anchor="w", pady=(10, 2))
-        self.props_list = tk.Listbox(col_a, height=3, bg=theme.INPUT, fg=FG, highlightthickness=0, bd=0,
-                                     selectbackground=theme.ACCENT, activestyle="none")
+        self.props_list = tk.Listbox(col_a, height=PROPS_MIN_ROWS, bg=theme.INPUT, fg=FG, highlightthickness=0,
+                                     bd=0, selectbackground=theme.ACCENT, activestyle="none", font=("Segoe UI", 10))
         self.props_list.pack(fill="x")
         row = ttk.Frame(col_a, style="Card.TFrame")
         row.pack(fill="x", pady=(4, 0))
@@ -1154,7 +1155,10 @@ class LoaderApp:
         self.props_list.delete(0, "end")
         for p in self.armor_props:
             name = self.catalog.armor_property_name(p.get("id")) if self.catalog else p.get("id")
-            self.props_list.insert("end", f"{name}  [{p.get('id')}]  ({p.get('rarity', 'Common')})")
+            rarity = {"Common": "обычное", "Rare": "редкое", "Unique": "уникальное"}.get(p.get("rarity"), p.get("rarity"))
+            self.props_list.insert("end", f" {name}  ·  {rarity}")
+        # show every property without scrolling (the column has room for it)
+        self.props_list.configure(height=max(PROPS_MIN_ROWS, min(PROPS_MAX_ROWS, len(self.armor_props))))
 
     def _add_prop(self):
         if self.current_item is None or not self.prop_id.get().strip():
