@@ -160,18 +160,21 @@ class RoundedBox(tk.Canvas):
     """
 
     def __init__(self, parent, bg=CARD, outline=BORDER, radius=12, pad=8, parent_bg=None, fill_height=False,
-                 frame_style="Card.TFrame"):
+                 frame_style="Card.TFrame", fixed_width=None):
         parent_bg = parent_bg or _bg_of(parent)
         super().__init__(parent, bg=parent_bg, highlightthickness=0, bd=0, height=40, width=40)
         self.fill_color, self.outline, self.radius, self.pad = bg, outline, radius, pad
         self.fill_height = fill_height
+        self.fixed_width = fixed_width
+        if fixed_width:
+            self.configure(width=fixed_width)
         self.inner = ttk.Frame(self, style=frame_style)
         self._win = self.create_window(pad, pad, anchor="nw", window=self.inner)
         self.inner.bind("<Configure>", self._inner_changed)
         self.bind("<Configure>", self._redraw)
 
     def _inner_changed(self, _e=None):
-        want_w = self.inner.winfo_reqwidth() + 2 * self.pad
+        want_w = self.fixed_width or self.inner.winfo_reqwidth() + 2 * self.pad
         if int(self.cget("width")) != want_w:
             self.configure(width=want_w)
         if not self.fill_height:

@@ -12,6 +12,8 @@ import threading
 
 from . import ue4pak
 
+CATALOG_SCHEMA = 2  # bump when the cached catalog.json needs rebuilding
+
 CATEGORIES = {"melee": "Ближний бой", "ranged": "Дальний бой", "armor": "Броня", "artifact": "Артефакты"}
 CATEGORY_SLOT = {"melee": "MeleeGear", "ranged": "RangedGear", "armor": "ArmorGear", "artifact": "HotbarSlot1"}
 
@@ -316,7 +318,8 @@ class GameCatalog:
         try:
             with open(cache_file, encoding="utf-8") as f:
                 cached = json.load(f)
-            if cached.get("fingerprint") == fingerprint and cached.get("language") == language:
+            if cached.get("fingerprint") == fingerprint and cached.get("language") == language \
+                    and cached.get("schema") == CATALOG_SCHEMA:
                 cat._from_dict(cached)
                 return cat
         except (OSError, ValueError):
@@ -327,7 +330,7 @@ class GameCatalog:
         cat.version = index.version_label
         cat.language, cat.strings = cat._load_strings(index, locres, language)
         with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(dict(cat._to_dict(), fingerprint=fingerprint), f, ensure_ascii=False)
+            json.dump(dict(cat._to_dict(), fingerprint=fingerprint, schema=CATALOG_SCHEMA), f, ensure_ascii=False)
         return cat
 
     def _load_strings(self, index, locres, language):
@@ -339,7 +342,7 @@ class GameCatalog:
             tables = ue4pak.parse_locres(index.read(locres[lang]))
         except (ue4pak.PakError, KeyError):
             return None, {}
-        keep = ("ItemType", "Enchantment", "ArmorProperties", "ItemTag")
+        keep = ("ItemType", "Enchantment", "ArmorProperties", "ItemTag", "ItemPowerEffect", "Mission")
         return lang, {ns: tables[ns] for ns in keep if ns in tables}
 
     def _to_dict(self):
@@ -375,8 +378,29 @@ class GameCatalog:
     def enchantment_name(self, ench_id):
         return self._text("Enchantment", ench_id) or ench_id
 
+    def item_effect(self, item_id):
+        """Gameplay effect text of an item (artifacts and some uniques), if the game has one."""
+        for key in (item_id, item_id + "_effect", item_id + "_desc", "Desc_" + item_id):
+            text = self._text("ItemPowerEffect", key)
+            if text:
+                return text
+        desc = self._text("ItemType", "Desc_" + item_id)
+        flavour = self._text("ItemType", "Flavour_" + item_id)
+        return desc if desc and desc != flavour else ""
+
+    def _enchant_text(self, ench_id, suffix):
+        base = STRING_KEY_FIXES.get(ench_id, ench_id)
+        for key in (ench_id + suffix, base + suffix, base + suffix.replace("_desc", "_effect_desc")):
+            text = self._text("Enchantment", key)
+            if text:
+                return text
+        return ""
+
+    def enchantment_effect(self, ench_id):
+        return self._enchant_text(ench_id, "_effect")
+
     def enchantment_description(self, ench_id):
-        return self._text("Enchantment", ench_id + "_desc") or ""
+        return self._enchant_text(ench_id, "_desc")
 
     def armor_property_name(self, prop_id):
         return self._text("ArmorProperties", prop_id) or prop_id

@@ -2,7 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 
-from . import catalog as cat_mod, gamedata as gd, theme
+from . import catalog as cat_mod, drops, gamedata as gd, theme
 
 BG, PANEL, FG, MUTED = theme.PAGE, theme.INPUT, theme.FG, theme.MUTED
 RARITY_COLORS = {"Common": "#e8e8e8", "Rare": "#4fc3f7", "Unique": "#ffb74d"}
@@ -50,18 +50,42 @@ class IconCache:
         return photo
 
 
+def item_info(catalog, ident, category=None):
+    """Preview texts for an item: what it does, its flavour text and where it drops."""
+    unique = "_unique" in ident.lower()
+    kind = cat_mod.CATEGORIES.get(category or (catalog.category(ident) if catalog else None), "Предмет")
+    return {
+        "kind": f"{kind} · {'уникальный' if unique else 'обычный'}",
+        "effect": catalog.item_effect(ident) if catalog else "",
+        "desc": catalog.item_description(ident) if catalog else "",
+        "where": drops.where(ident),
+    }
+
+
+def enchantment_info(catalog, ident):
+    powerful = ident in gd.POWERFUL_ENCHANTMENTS
+    return {
+        "kind": "Мощное зачарование" if powerful else "Зачарование",
+        "effect": catalog.enchantment_effect(ident) if catalog else "",
+        "desc": catalog.enchantment_description(ident) if catalog else "",
+        "where": drops.ENCHANTMENT_SOURCE,
+    }
+
+
 def item_rows(catalog, extra_ids):
     """Picker rows for every catalog item plus IDs only known from the save."""
     rows, seen = [], set()
     if catalog and catalog.loaded:
         for ident, info in catalog.items.items():
             label = cat_mod.CATEGORIES.get(info["category"], "Прочее")
-            rows.append((ident, catalog.item_name(ident), label, label, "item", catalog.item_description(ident)))
+            rows.append((ident, catalog.item_name(ident), label, label, "item",
+                         item_info(catalog, ident, info["category"])))
             seen.add(ident)
     for ident in extra_ids:
         if ident and ident not in seen:
             name = catalog.item_name(ident) if catalog else ident
-            rows.append((ident, name, "Прочее", "Прочее", "item", "Найден в сохранении"))
+            info = item_info(catalog, ident) if catalog else {"kind": "Найден в сохранении"}
+            rows.append((ident, name, "Прочее", "Прочее", "item", info))
     order = {v: i for i, v in enumerate(list(cat_mod.CATEGORIES.values()) + ["Прочее"])}
     rows.sort(key=lambda r: (order[r[3]], r[1].lower()))
     return rows
@@ -70,7 +94,7 @@ def item_rows(catalog, extra_ids):
 class _Picker(tk.Toplevel):
     """Base: search box + filter + icon list + details pane."""
 
-    def __init__(self, parent, title, filters, icons, on_pick, keep_open=False, width=760, height=560):
+    def __init__(self, parent, title, filters, icons, on_pick, keep_open=False, width=1040, height=640):
         super().__init__(parent, bg=BG, padx=10, pady=10)
         self.title(title)
         self.geometry(f"{width}x{height}")
@@ -108,6 +132,7 @@ class _Picker(tk.Toplevel):
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True, pady=(8, 0))
+        self._build_preview(body)
         style = ttk.Style(self)
         style.configure("Picker.Treeview", rowheight=36)
         self.tree = ttk.Treeview(body, columns=("id", "kind"), show="tree headings", style="Picker.Treeview",
@@ -115,9 +140,9 @@ class _Picker(tk.Toplevel):
         self.tree.heading("#0", text="Название")
         self.tree.heading("id", text="ID")
         self.tree.heading("kind", text="Тип")
-        self.tree.column("#0", width=300)
-        self.tree.column("id", width=220)
-        self.tree.column("kind", width=120, stretch=False)
+        self.tree.column("#0", width=260)
+        self.tree.column("id", width=170)
+        self.tree.column("kind", width=110, stretch=False)
         scroll = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -160,9 +185,50 @@ class _Picker(tk.Toplevel):
         sel = self.tree.selection()
         return self.by_iid.get(sel[0]) if sel else None
 
+    def _build_preview(self, parent):
+        box = theme.RoundedBox(parent, bg=theme.CARD, outline=theme.BORDER, radius=12, pad=6, fill_height=True,
+                               fixed_width=320)
+        box.pack(side="right", fill="y", padx=(12, 0))
+        inner = ttk.Frame(box.inner, style="Card.TFrame", padding=(12, 10))
+        inner.pack(fill="both", expand=True)
+        self.pv_icon = tk.Label(inner, bg=theme.CARD)
+        self.pv_icon.pack(anchor="w")
+        self.pv_name = tk.Label(inner, bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 13, "bold"), wraplength=270,
+                                justify="left")
+        self.pv_name.pack(anchor="w", pady=(8, 0))
+        self.pv_kind = tk.Label(inner, bg=theme.CARD, fg=theme.ACCENT_HOVER, font=("Segoe UI", 9))
+        self.pv_kind.pack(anchor="w")
+        self.pv_id = tk.Label(inner, bg=theme.CARD, fg=theme.DIM, font=("Segoe UI", 8))
+        self.pv_id.pack(anchor="w", pady=(0, 6))
+        self.pv_sections = {}
+        for key, title in (("effect", "Что делает"), ("desc", "Описание"), ("where", "Где найти")):
+            head = tk.Label(inner, text=title, bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 9, "bold"))
+            body = tk.Label(inner, bg=theme.CARD, fg=theme.MUTED, font=("Segoe UI", 9), wraplength=270,
+                            justify="left")
+            self.pv_sections[key] = (head, body)
+
     def _show_details(self):
         row = self.selected()
-        self.details.configure(text=(f"{row[1]}  [{row[0]}]\n{row[5]}" if row else ""))
+        if not row:
+            return
+        ident, name, _label, _flt, icon_kind, info = row
+        if isinstance(info, str):
+            info = {"desc": info}
+        self.pv_icon.configure(image=self.icons.get(icon_kind, ident, 72))
+        self.pv_name.configure(text=name)
+        self.pv_kind.configure(text=info.get("kind", ""))
+        self.pv_id.configure(text=ident)
+        fallback = {"effect": "", "desc": "", "where": "Место выпадения: данных пока нет."}
+        for key, (head, body) in self.pv_sections.items():
+            head.pack_forget()
+            body.pack_forget()
+            text = (info.get(key) or fallback[key]).strip()
+            if key == "desc" and text and text == (info.get("effect") or "").strip():
+                text = ""
+            if text:
+                head.pack(anchor="w", pady=(8, 0))
+                body.configure(text=text)
+                body.pack(anchor="w")
 
     def pick(self):
         row = self.selected()
@@ -178,7 +244,7 @@ class ItemPicker(_Picker):
 
     def __init__(self, parent, icons, catalog, extra_ids, on_add):
         filters = [ALL] + list(cat_mod.CATEGORIES.values()) + ["Прочее"]
-        super().__init__(parent, "Добавить предмет", filters, icons, self._add, keep_open=True, width=820, height=640)
+        super().__init__(parent, "Добавить предмет", filters, icons, self._add, keep_open=True, width=1080, height=680)
         self.on_add = on_add
         self.catalog = catalog
         self.dest = tk.StringVar(value="inventory")
@@ -220,7 +286,7 @@ class ItemTypePicker(_Picker):
 
     def __init__(self, parent, icons, catalog, extra_ids, on_pick):
         filters = [ALL] + list(cat_mod.CATEGORIES.values()) + ["Прочее"]
-        super().__init__(parent, "Тип предмета", filters, icons, lambda i, p: on_pick(i), width=760, height=600)
+        super().__init__(parent, "Тип предмета", filters, icons, lambda i, p: on_pick(i), width=1000, height=640)
         ttk.Button(self.bottom, text="Выбрать", style="Accent.TButton", command=self.pick).pack(side="right")
         self.set_rows(item_rows(catalog, extra_ids))
 
@@ -229,14 +295,15 @@ class EnchantmentPicker(_Picker):
     def __init__(self, parent, icons, catalog, known_ids, slot, on_pick, allow_unset=True):
         suitable = "Подходящие"
         super().__init__(parent, "Выбор зачарования", [suitable, ALL], icons, lambda i, p: on_pick(i),
-                         width=700, height=560)
+                         width=960, height=600)
         self.suitable = gd.enchantments_for_slot(slot) if slot in gd.GEAR_SLOTS else None
         ids = set(known_ids)
         if catalog and catalog.loaded:
             ids.update(catalog.enchantments)
         rows = []
         if allow_unset:
-            rows.append((gd.UNSET_ENCHANTMENT, "— пусто —", "", "", "enchantment", "Убрать зачарование из этой ячейки"))
+            rows.append((gd.UNSET_ENCHANTMENT, "— пусто —", "", "", "enchantment",
+                         {"kind": "Пустая ячейка", "effect": "Убрать зачарование из этой ячейки."}))
         in_game = set(catalog.enchantments) if catalog and catalog.loaded else set()
         for ident in sorted(ids, key=lambda i: (i not in in_game,
                                                 (catalog.enchantment_name(i) if catalog else i).lower())):
@@ -244,8 +311,7 @@ class EnchantmentPicker(_Picker):
                 continue
             name = catalog.enchantment_name(ident) if catalog else ident
             kind = "Мощное" if ident in gd.POWERFUL_ENCHANTMENTS else ""
-            desc = catalog.enchantment_description(ident) if catalog else ""
-            rows.append((ident, name, kind, "", "enchantment", desc))
+            rows.append((ident, name, kind, "", "enchantment", enchantment_info(catalog, ident)))
         if not self.suitable:
             self.filter.set(ALL)
         ttk.Button(self.bottom, text="Выбрать", style="Accent.TButton", command=self.pick).pack(side="right")
