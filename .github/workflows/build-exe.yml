@@ -27,8 +27,9 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests -t . -v
 
-      - name: Check imports
-        run: python -c "import mcd_loader.overlay, mcd_loader.wasd, vgamepad; print(mcd_loader.wasd.driver_installer())"
+      - name: Check imports and bundled ViGEmBus installer
+        # importing vgamepad itself needs the driver, which CI runners do not have
+        run: python -c "import mcd_loader.overlay, mcd_loader.wasd as w; p = w.driver_installer(); print(p); assert p"
 
       - name: Build MCDLoader.exe
         run: python -m PyInstaller --noconfirm --onefile --windowed --name MCDLoader --collect-all vgamepad --hidden-import PIL._tkinter_finder launcher.py

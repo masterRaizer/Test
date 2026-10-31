@@ -91,6 +91,10 @@ class WasdMovement:
             import vgamepad
         except ImportError as e:
             raise WasdUnavailable("Не установлен пакет vgamepad: pip install vgamepad") from e
+        except Exception as e:  # vgamepad connects to the bus at import: fails without the driver
+            raise WasdUnavailable(
+                "Не удалось создать виртуальный геймпад: не установлен драйвер ViGEmBus.",
+                installer=driver_installer()) from e
         try:
             pad = vgamepad.VX360Gamepad()
         except Exception as e:
