@@ -557,13 +557,29 @@ class LoaderApp:
         self.items_count_var = tk.StringVar()
         for var in (self.power_var, self.points_var, self.items_count_var):
             ttk.Label(info, textvariable=var, style="Card.TLabel").pack(anchor="w", pady=3)
+
+        pts = theme.card(right, "Очки зачарований", pack={"fill": "x", "pady": (0, 10)})
+        self.points_target = tk.StringVar(value="1000")
+        self.points_info = tk.StringVar()
+        ttk.Label(pts, textvariable=self.points_info, style="CardMuted.TLabel", wraplength=360,
+                  justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        theme.card_row(pts, 1, "Нужно свободных очков", ttk.Spinbox(pts, from_=0, to=1000000, width=10,
+                                                                    textvariable=self.points_target))
+        row = ttk.Frame(pts, style="Card.TFrame")
+        row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        shell.CanvasButton(row, "Через уровень", self._points_via_level, bg=theme.CARD).pack(side="left")
+        shell.CanvasButton(row, "Бонус без уровня", self._points_bonus, primary=False, bg=theme.CARD).pack(
+            side="left", padx=6)
+        shell.CanvasButton(row, "Убрать бонус", self._points_clear_bonus, primary=False, bg=theme.CARD).pack(
+            side="left")
         quick = theme.card(right, "Быстрые действия")
-        for text, cmd in (("Изумруды и золото = 999 999", self._quick_rich),
-                          ("Открыть все сложности и угрозы", self._quick_unlock),
-                          ("Уровень персонажа = 100", lambda: self.level_var.set("100")),
-                          ("Все предметы: уровень…", self.set_all_levels),
-                          ("Все зачарования на уровень 3", self.max_all_enchantments)):
-            ttk.Button(quick, text=text, command=cmd, width=34).pack(fill="x", pady=3)
+        for k, (text, cmd) in enumerate((("Изумруды и золото 999 999", self._quick_rich),
+                                         ("Открыть всё", self._quick_unlock),
+                                         ("Уровень = 100", lambda: self.level_var.set("100")),
+                                         ("Уровень предметов…", self.set_all_levels),
+                                         ("Зачарования на 3", self.max_all_enchantments))):
+            ttk.Button(quick, text=text, command=cmd).grid(row=k // 2, column=k % 2, sticky="we", padx=3, pady=3)
+            quick.columnconfigure(k % 2, weight=1)
 
     def _build_inventory_tab(self):
         tab = self._page("Инвентарь")
@@ -918,7 +934,14 @@ class LoaderApp:
         s = self.save
         self.power_var.set(f"Сила персонажа: {s.character_power()}")
         left = s.enchantment_points_left()
-        self.points_var.set(f"Свободные очки зачарований: {left}" + ("  ⚠ меньше нуля" if left < 0 else ""))
+        bonus = s.bonus_points()
+        self.points_var.set(f"Свободные очки зачарований: {left}" + (f" (+{bonus} бонус)" if bonus else "")
+                            + ("  ⚠ меньше нуля" if left < 0 else ""))
+        self.points_info.set(
+            f"Уровень {s.level}, потрачено {s.enchantment_points_spent()}, свободно {left}"
+            + (f", бонус {bonus} (эксперимент)" if bonus else "") + ".\n"
+            "«Через уровень» — надёжно, игра покажет новый уровень. «Бонус без уровня» — экспериментально, "
+            "проверьте в игре.")
         self.items_count_var.set(f"Предметов: {len(s.inventory)} в инвентаре, {len(s.chest)} в сундуке")
 
     def refresh_items(self):
@@ -999,6 +1022,50 @@ class LoaderApp:
         if threat and threat != s.get_threat():
             s.set_threat(threat)
         self.refresh_summary()
+
+    def _points_target_value(self):
+        try:
+            return max(0, int(float(self.points_target.get())))
+        except ValueError:
+            messagebox.showerror("Очки зачарований", "Введите число", parent=self.root)
+            return None
+
+    def _points_via_level(self):
+        if not self.save:
+            return
+        target = self._points_target_value()
+        if target is None:
+            return
+        self.commit_forms()
+        self.save.set_bonus_points(0)  # the two ways would add up otherwise
+        level = self.save.set_free_points_via_level(target)
+        self.refresh_character()
+        self.status_var.set(f"Уровень {level}: свободных очков {self.save.enchantment_points_left()}. "
+                            "Нажмите «Применить в игре».")
+
+    def _points_bonus(self):
+        if not self.save:
+            return
+        target = self._points_target_value()
+        if target is None:
+            return
+        self.commit_forms()
+        extra = max(0, target - self.save.enchantment_points_left())
+        try:
+            item = self.save.set_bonus_points(extra)
+        except ValueError as e:
+            messagebox.showerror("Очки зачарований", str(e), parent=self.root)
+            return
+        self.refresh_summary()
+        where = self._item_name(item.get("type")) if item else "—"
+        self.status_var.set(f"Бонус {extra} очков записан в пустую ячейку зачарования предмета «{where}». "
+                            "Это экспериментально: примените и проверьте в игре.")
+
+    def _points_clear_bonus(self):
+        if self.save:
+            self.save.set_bonus_points(0)
+            self.refresh_summary()
+            self.status_var.set("Бонусные очки убраны. Нажмите «Применить в игре».")
 
     def _quick_rich(self):
         for key in ("Emerald", "Gold"):

@@ -183,6 +183,40 @@ class SaveFile:
         # Matches MCDSaveEdit: one point is consumed by level 1.
         return self.level - 1 - self.enchantment_points_spent()
 
+    def set_free_points_via_level(self, free_points):
+        """Raise/lower the level so that exactly free_points enchantment points are unspent."""
+        self.level = max(1, int(free_points) + self.enchantment_points_spent() + 1)
+        return self.level
+
+    # Experimental bonus: an empty ("Unset") enchantment option whose investedPoints is negative.
+    # If the game totals investedPoints to know what was spent, this frees that many extra points.
+    def _bonus_carriers(self):
+        for item in self.all_items():
+            for e in item.get("enchantments") or []:
+                if e.get("id") == gd.UNSET_ENCHANTMENT and int(e.get("investedPoints") or 0) < 0:
+                    yield item, e
+
+    def bonus_points(self):
+        return sum(-int(e["investedPoints"]) for _item, e in self._bonus_carriers())
+
+    def set_bonus_points(self, amount):
+        """Store amount bonus points on one empty enchantment option. Returns the carrier item."""
+        for _item, e in list(self._bonus_carriers()):
+            e["investedPoints"] = 0
+        self.dirty = True
+        amount = int(amount)
+        if amount <= 0:
+            return None
+        candidates = sorted(self.inventory, key=lambda i: (i.get("equipmentSlot") != "MeleeGear",
+                                                          i.get("equipmentSlot") is None))
+        for item in candidates + list(self.chest):
+            enchants = item.get("enchantments") or []
+            for e in reversed(enchants):
+                if e.get("id") == gd.UNSET_ENCHANTMENT and not e.get("level"):
+                    e["investedPoints"] = -amount
+                    return item
+        raise ValueError("нет предмета с пустой ячейкой зачарования — добавьте оружие или броню")
+
     @staticmethod
     def _next_index(collection):
         indexes = [i.get("inventoryIndex") for i in collection if i.get("inventoryIndex") is not None]
@@ -298,22 +332,28 @@ def set_enchantment(item, index, enchantment_id, level):
         enchants.append({"id": gd.UNSET_ENCHANTMENT, "level": 0})
     level = max(0, min(3, int(level)))
     ench = enchants[index]
+    bonus = int(ench.get("investedPoints") or 0) if ench.get("id") == gd.UNSET_ENCHANTMENT else 0
     ench["id"] = enchantment_id or gd.UNSET_ENCHANTMENT
     ench["level"] = level if ench["id"] != gd.UNSET_ENCHANTMENT else 0
     gilded = item.get("netheriteEnchant") is not None
     ench["investedPoints"] = gd.enchantment_cost(ench["id"], ench["level"], gilded)
+    if bonus < 0 and ench["id"] == gd.UNSET_ENCHANTMENT:
+        ench["investedPoints"] = bonus  # keep the bonus points carrier
     # Only one enchantment per slot may be active.
     if ench["level"] > 0:
         base = index - index % 3
         for j in range(base, base + 3):
             if j != index:
                 enchants[j]["level"] = 0
-                enchants[j]["investedPoints"] = 0
+                if int(enchants[j].get("investedPoints") or 0) > 0:
+                    enchants[j]["investedPoints"] = 0
 
 
 def recompute_invested_points(item):
     gilded = item.get("netheriteEnchant") is not None
     for e in item.get("enchantments") or []:
+        if e.get("id") == gd.UNSET_ENCHANTMENT and int(e.get("investedPoints") or 0) < 0:
+            continue  # bonus points carrier, see SaveFile.set_bonus_points
         e["investedPoints"] = gd.enchantment_cost(e.get("id"), e.get("level"), gilded)
 
 

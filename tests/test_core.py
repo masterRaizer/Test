@@ -137,5 +137,46 @@ class WasdTests(unittest.TestCase):
         self.assertEqual(stick_from_keys(False, False, True, False, slow=True), (0.0, -0.5))
 
 
+class EnchantmentPointsTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "Characters", "hero.dat")
+        os.makedirs(os.path.dirname(self.path))
+        shutil.copy(BLANK, self.path)
+        self.save = SaveFile(self.path)
+        self.save.level = 50
+        self.sword = self.save.new_item("Sword", slot="MeleeGear")
+        set_enchantment(self.sword, 0, "Sharpness", 3)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def test_free_points_via_level(self):
+        self.save.set_free_points_via_level(1000)
+        self.assertEqual(self.save.enchantment_points_left(), 1000)
+        self.assertEqual(self.save.level, 1000 + 6 + 1)
+
+    def test_bonus_points_roundtrip_and_survive_edits(self):
+        from mcd_loader.savefile import recompute_invested_points
+        item = self.save.set_bonus_points(950)
+        self.assertIs(item, self.sword)
+        self.assertEqual(self.save.bonus_points(), 950)
+        recompute_invested_points(self.sword)
+        set_enchantment(self.sword, 1, "Looting", 0)
+        set_enchantment(self.sword, 3, "Echo", 2)
+        self.assertEqual(self.save.bonus_points(), 950)
+        self.save.write()
+        again = SaveFile(self.path)
+        self.assertEqual(again.bonus_points(), 950)
+        self.assertEqual(again.level, 50)
+        again.set_bonus_points(0)
+        self.assertEqual(again.bonus_points(), 0)
+
+    def test_bonus_needs_enchantable_item(self):
+        self.save.remove_item(self.sword)
+        with self.assertRaises(ValueError):
+            self.save.set_bonus_points(10)
+
+
 if __name__ == "__main__":
     unittest.main()
