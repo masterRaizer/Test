@@ -13,8 +13,8 @@ from . import catalog as cat_mod, chrome, game, gamedata as gd, shell, theme
 from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
 from . import wasd as wasd_mod
 from .wasd import WasdMovement, WasdUnavailable
-from .savefile import (SaveFile, find_saves, item_level, max_out_enchantments,
-                       read_profile, recompute_invested_points, set_enchantment, set_item_level)
+from .savefile import (SaveFile, clear_enchantments, find_saves, item_level, max_out_enchantments,
+                       read_profile, set_enchantment, set_item_level)
 
 BG, PANEL, FG, MUTED, ACCENT, WARN = theme.PAGE, theme.INPUT, theme.FG, theme.MUTED, theme.ACCENT, theme.WARN
 NO_SLOT = "(не надет)"
@@ -62,6 +62,10 @@ class LoaderApp:
         self.wasd = WasdMovement(arrows=cfg.get("wasd_arrows", True), shift_walk=cfg.get("wasd_shift", True))
         self._icon_thread_stop = threading.Event()
         self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
+        self._catalog_gen = 0           # ignores results of an older catalog load
+        self._jobs = {}                 # periodic after() callbacks, cancelled on shutdown
+        self._last_running = False
+        self._last_tab = None
 
         root.title("SecretGear — Minecraft Dungeons")
         root.attributes("-topmost", True)
@@ -71,8 +75,7 @@ class LoaderApp:
         theme.apply_theme(root)
         step("Подготовка интерфейса")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.bind("<Control-s>", lambda e: self.apply_to_game())
-        root.bind("<Escape>", lambda e: self.hide() if self.hotkey.available else None)
+        root.bind("<Control-s>", lambda e: self.apply_to_game() if self.frame.winfo_ismapped() else None)
 
         self._build_sidebar(self.frame)
         right = tk.Frame(self.frame, bg=theme.WINDOW)
@@ -114,9 +117,9 @@ class LoaderApp:
         self.refresh_save_list(select=initial_save or cfg.get("last_save"))
         step("Файлы игры")
         self.notebook.select(self.HOME)
-        self.root.after(50, self._poll_hotkey)
-        self.root.after(2000, self._watch_disk)
-        self.root.after(100, self._drain_ui_queue)
+        self._every("hotkey", 50, self._poll_hotkey)
+        self._every("disk", 2000, self._watch_disk)
+        self._every("queue", 100, self._drain_ui_queue)
         self.load_catalog()
         if cfg.get("wasd_enabled"):
             self.root.after(500, lambda: self.set_wasd(True))
@@ -354,7 +357,8 @@ class LoaderApp:
         if path in self.saves:
             self.save_box.current(self.saves.index(path))
             self.open_selected_save()
-        self.show_page(0)
+        if self.save and self.save.path == path:
+            self.show_page(0)
 
     # ---------------------------------------------------------- system page
     def _build_system_tab(self):
@@ -413,7 +417,9 @@ class LoaderApp:
         checks.append(("Резервные копии", bool(self.cfg.get("backup_on_apply", True)),
                        "Бэкап перед каждым применением", "" if self.cfg.get("backup_on_apply", True) else "Включить",
                        self._enable_backups))
-        running = game.is_game_running()
+        if self.notebook.index("current") == self.SYSTEM:
+            self._last_running = game.is_game_running()
+        running = self._last_running
         checks.append(("Игра запущена", None, "Minecraft Dungeons запущена" if running else "Игра сейчас не запущена",
                        "", None))
         return checks
@@ -466,7 +472,8 @@ class LoaderApp:
     def fix_all(self):
         for _title, ok, _desc, _hint, fix in getattr(self, "_checks", []):
             if ok is False and fix:
-                fix()
+                fix()  # one at a time: fixes open dialogs or reload game files
+                break
         self.root.after(600, self.run_checks)
 
     def _install_driver(self):
@@ -502,7 +509,7 @@ class LoaderApp:
 
         def wait():
             if game.is_game_running() or not game.IS_WINDOWS:
-                view.set_status(f"Игра запущена. {self.cfg.get('hotkey', 'F8')} — открыть MCD Loader поверх игры")
+                view.set_status(f"Игра запущена. {self.cfg.get('hotkey', 'F8')} — открыть SecretGear поверх игры")
                 self.root.after(1800, finish)
             elif time.time() > deadline:
                 view.set_status("Игра не появилась за 90 секунд")
@@ -582,9 +589,9 @@ class LoaderApp:
         quick = theme.card(right, "Быстрые действия")
         for k, (text, cmd) in enumerate((("Изумруды и золото 999 999", self._quick_rich),
                                          ("Открыть всё", self._quick_unlock),
-                                         ("Уровень = 100", lambda: self.level_var.set("100")),
+                                         ("Уровень = 100", self._quick_level_100),
                                          ("Уровень предметов…", self.set_all_levels),
-                                         ("Зачарования на 3", self.max_all_enchantments))):
+                                         ("Выбранные чары до 3", self.max_all_enchantments))):
             ttk.Button(quick, text=text, command=cmd).grid(row=k // 2, column=k % 2, sticky="we", padx=3, pady=3)
             quick.columnconfigure(k % 2, weight=1)
 
@@ -714,6 +721,8 @@ class LoaderApp:
                 self._update_ench_button(button, id_var)
                 self.ench_vars.append((id_var, lvl_var))
                 self.ench_boxes.append(button)
+        ttk.Button(col_b_outer, text="Снять все чары с предмета", command=self.clear_item_enchantments).pack(
+            fill="x", pady=(0, 6))
         ttk.Button(col_b_outer, text="Сохранить предмет", style="Accent.TButton",
                    command=self.commit_item).pack(fill="x", pady=(2, 0))
 
@@ -826,7 +835,7 @@ class LoaderApp:
             "Нужен драйвер ViGEmBus — ставится вместе с пакетом vgamepad.")).pack(anchor="w")
 
     # ---------------------------------------------------------- save files
-    def refresh_save_list(self, select=None):
+    def refresh_save_list(self, select=None, confirmed=False):
         self.saves = find_saves(self.cfg.get("extra_save_dirs", []))
         if select and os.path.isfile(select) and select not in self.saves:
             self.saves.insert(0, select)
@@ -847,32 +856,40 @@ class LoaderApp:
         if not self.saves:
             self.status_var.set("Сохранения не найдены. Нажмите «Открыть .dat…» и укажите файл из папки Characters.")
             return
+        if self.save and select is None and self.save.path in self.saves:
+            select = self.save.path  # keep the open character selected after a rescan
         index = self.saves.index(select) if select in self.saves else 0
         self.save_box.current(index)
-        self.open_selected_save()
+        self.open_selected_save(confirmed=confirmed)
 
-    def open_selected_save(self):
+    def open_selected_save(self, confirmed=False):
         index = self.save_box.current()
         if index < 0:
             return
         path = self.saves[index]
         if self.save and self.save.path == path:
             return
-        if not self._confirm_discard():
+        if not confirmed and not self._confirm_discard():
+            self._show_current_save_in_box()
             return
         self.load(path)
 
+    def _show_current_save_in_box(self):
+        if self.save and self.save.path in self.saves:
+            self.save_box.current(self.saves.index(self.save.path))
+
     def browse_save(self):
-        path = filedialog.askopenfilename(title="Сохранение персонажа", filetypes=[("Minecraft Dungeons", "*.dat"), ("Все", "*.*")])
-        if path:
-            if self._confirm_discard():
-                self.refresh_save_list(select=os.path.normpath(path))
+        path = filedialog.askopenfilename(title="Сохранение персонажа", filetypes=[("Minecraft Dungeons", "*.dat"),
+                                                                                  ("Все", "*.*")])
+        if path and self._confirm_discard():
+            self.refresh_save_list(select=os.path.normpath(path), confirmed=True)
 
     def load(self, path):
         try:
             self.save = SaveFile(path)
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось прочитать сохранение:\n{e}", parent=self.root)
+            self._show_current_save_in_box()
             return
         self.cfg["last_save"] = path
         game.save_config(self.cfg)
@@ -1003,6 +1020,7 @@ class LoaderApp:
         self.json_text.delete("1.0", "end")
         self.json_text.insert("1.0", json.dumps(self.save.profile, ensure_ascii=False, indent=2))
         self.json_text.edit_reset()
+        self.json_text.edit_modified(False)
 
     # ---------------------------------------------------- character edits
     def _on_level_changed(self, *_):
@@ -1084,6 +1102,10 @@ class LoaderApp:
             self.refresh_summary()
             self.status_var.set("Бонусные очки убраны. Нажмите «Применить в игре».")
 
+    def _quick_level_100(self):
+        self.level_var.set("100")
+        self.commit_character()
+
     def _quick_rich(self):
         for key in ("Emerald", "Gold"):
             self.currency_vars[key].set("999999")
@@ -1116,7 +1138,7 @@ class LoaderApp:
         self.it_new.set(bool(item.get("markedNew")))
         enchants = item.get("enchantments") or []
         for i, (id_var, lvl_var) in enumerate(self.ench_vars):
-            e = enchants[i] if i < len(enchants) else {}
+            e = enchants[i] if i < len(enchants) else {}  # rows past the item's slots stay empty
             id_var.set(e.get("id", gd.UNSET_ENCHANTMENT))
             lvl_var.set(str(e.get("level", 0)))
         gilded = item.get("netheriteEnchant")
@@ -1136,6 +1158,9 @@ class LoaderApp:
 
     def _add_prop(self):
         if self.current_item is None or not self.prop_id.get().strip():
+            return
+        if self._item_kind() != "armor" and not self.current_item.get("armorproperties"):
+            messagebox.showinfo("Свойства брони", "Свойства брони бывают только у брони.", parent=self.root)
             return
         self.armor_props.append({"id": self.prop_id.get().strip(), "rarity": self.prop_rarity.get() or "Common"})
         self._refresh_props()
@@ -1167,7 +1192,8 @@ class LoaderApp:
             if key in item or var.get():
                 item[key] = bool(var.get())
 
-        if self.gild_on.get() and self.gild_id.get().strip():
+        artifact = self._item_kind(item) == "artifact"
+        if self.gild_on.get() and self.gild_id.get().strip() and not (artifact and "netheriteEnchant" not in item):
             gilded = item.get("netheriteEnchant") or {}
             gilded["id"] = self.gild_id.get().strip()
             gilded["level"] = max(0, min(3, _int(self.gild_lvl, 1)))
@@ -1176,17 +1202,23 @@ class LoaderApp:
             item.pop("netheriteEnchant", None)
 
         form = [(v[0].get().strip() or gd.UNSET_ENCHANTMENT, _int(v[1], 0)) for v in self.ench_vars]
-        has_enchants = "enchantments" in item or any(eid != gd.UNSET_ENCHANTMENT for eid, _ in form)
-        if has_enchants:
-            current = [(e.get("id"), int(e.get("level") or 0)) for e in item.get("enchantments") or []]
-            if current != form:
-                for i, (eid, lvl) in enumerate(form):
-                    if lvl == 0:
+        existing = item.get("enchantments") or []
+        # Only the item's own slots are compared/written; rows past them count only if the user filled them.
+        used = max(len(existing), max((i + 1 for i, (eid, lvl) in enumerate(form)
+                                       if eid != gd.UNSET_ENCHANTMENT or lvl), default=0))
+        if artifact and not existing:
+            used = 0  # artifacts have no enchantment slots
+        if used:
+            used = min(gd.ENCHANTMENTS_PER_ITEM, -(-used // 3) * 3)  # whole slots of three options
+            current = [(e.get("id"), int(e.get("level") or 0)) for e in existing]
+            current += [(gd.UNSET_ENCHANTMENT, 0)] * (used - len(current))
+            if current[:used] != form[:used]:
+                for i, (eid, lvl) in enumerate(form[:used]):
+                    if lvl == 0 and (i >= len(existing) or current[i] != (eid, lvl)):
                         set_enchantment(item, i, eid, 0)
-                for i, (eid, lvl) in enumerate(form):
-                    if lvl > 0:
+                for i, (eid, lvl) in enumerate(form[:used]):
+                    if lvl > 0 and (i >= len(existing) or current[i] != (eid, lvl)):
                         set_enchantment(item, i, eid, lvl)
-            recompute_invested_points(item)
 
         if self.armor_props or "armorproperties" in item:
             item["armorproperties"] = [dict(p) for p in self.armor_props]
@@ -1279,9 +1311,21 @@ class LoaderApp:
         if not self.save:
             return
         self.commit_item(refresh=False)
-        for it in self.save.all_items():
-            max_out_enchantments(it)
-        self.save.dirty = True
+        changed = sum(1 for it in self.save.all_items() if max_out_enchantments(it))
+        if changed:
+            self.save.dirty = True
+        self.load_item_form(self.current_item)
+        self.refresh_items()
+        self.status_var.set(f"Выбранные зачарования подняты до 3 на {changed} предмет(ах). "
+                            "Невыбранные варианты не тронуты.")
+
+    def clear_item_enchantments(self):
+        if not self.save or self.current_item is None:
+            return
+        self.commit_item(refresh=False)
+        if clear_enchantments(self.current_item):
+            self.save.dirty = True
+            self.status_var.set("Все зачарования предмета сняты. Нажмите «Применить в игре».")
         self.load_item_form(self.current_item)
         self.refresh_items()
 
@@ -1301,12 +1345,20 @@ class LoaderApp:
         self.current_item = None
         self.load_item_form(None)
         self.refresh_all()
+        self.json_text.edit_modified(False)
         self.status_var.set("JSON принят — нажмите «Применить в игре», чтобы записать сохранение")
 
     def _on_tab_changed(self, _event=None):
         self._highlight_nav()
+        current = self.notebook.index("current")
+        left_json = self._last_tab == 2 and current != 2
+        self._last_tab = current
         if not self.save:
             return
+        if left_json and self.json_text.edit_modified():
+            if messagebox.askyesno("JSON", "Текст JSON изменён, но не принят. Принять изменения?", parent=self.root):
+                self.apply_json_text()
+            self.json_text.edit_modified(False)
         self.commit_forms()
         if self.notebook.index("current") == 2:
             self.refresh_json()
@@ -1414,12 +1466,20 @@ class LoaderApp:
         else:
             self.hide()
 
+    def _every(self, key, ms, fn):
+        """Run fn every ms milliseconds until shutdown()."""
+        def tick():
+            try:
+                fn()
+            except Exception:
+                logging.exception("periodic task %s failed", key)
+            if key in self._jobs:
+                self._jobs[key] = self.root.after(ms, tick)
+        self._jobs[key] = self.root.after(ms, tick)
+
     def _poll_hotkey(self):
-        try:
-            if self.hotkey.pressed():
-                self.toggle()
-        finally:
-            self.root.after(50, self._poll_hotkey)
+        if self.hotkey.pressed():
+            self.toggle()
 
     def _sync_with_disk(self):
         if not self.save or not self.save.changed_on_disk():
@@ -1439,11 +1499,8 @@ class LoaderApp:
             self.status.configure(style="Muted.TLabel")
 
     def _watch_disk(self):
-        try:
-            if self.root.state() != "withdrawn":
-                self._sync_with_disk()
-        finally:
-            self.root.after(2000, self._watch_disk)
+        if self.root.state() != "withdrawn":
+            self._sync_with_disk()
 
     def on_close(self):
         self.commit_forms()
@@ -1456,6 +1513,12 @@ class LoaderApp:
     def shutdown(self):
         self._icon_thread_stop.set()
         self.wasd.stop()
+        for job in self._jobs.values():
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._jobs.clear()
 
     # ------------------------------------------------- game catalog/icons
     def load_catalog(self, force=False):
@@ -1473,6 +1536,11 @@ class LoaderApp:
         self._icon_thread_stop.set()
         self._icon_thread_stop = threading.Event()
         stop = self._icon_thread_stop
+        self._catalog_gen += 1
+        gen = self._catalog_gen
+
+        def post(fn):
+            self._ui_queue.put(lambda: fn() if gen == self._catalog_gen else None)
         cache_dir = os.path.join(game.CACHE_DIR, "catalog")
         self.catalog_error = None
         if force:
@@ -1493,18 +1561,23 @@ class LoaderApp:
             except Exception as e:
                 logging.exception("catalog load failed for %s", paks_dir)
                 message = f"Не удалось прочитать файлы игры: {e}"
-                self.catalog_error = str(e)
-                self._ui_queue.put(lambda: (self.catalog_status.set(message), self.show_banner(
-                    f"{message}. Подробности — в файле {game.LOG_PATH}"), self.run_checks()))
+                error = str(e)
+
+                def failed():
+                    self.catalog_error = error
+                    self.catalog_status.set(message)
+                    self.show_banner(f"{message}. Подробности — в файле {game.LOG_PATH}")
+                    self.run_checks()
+                post(failed)
                 return
             logging.info("catalog: %s items, %s enchantments, version %s, language %s", len(catalog.items),
                          len(catalog.enchantments), catalog.version, catalog.language)
-            self._ui_queue.put(lambda: self._on_catalog(catalog))
+            post(lambda: self._on_catalog(catalog))
             catalog.extract_all_icons(stop=stop.is_set)
             ok, failed, sample = catalog.icon_stats()
             logging.info("icons: %s ok, %s failed; e.g. %s", ok, failed, sample)
             if not stop.is_set():
-                self._ui_queue.put(self._on_icons_ready)
+                post(self._on_icons_ready)
 
         threading.Thread(target=work, daemon=True, name="catalog").start()
 
@@ -1514,8 +1587,6 @@ class LoaderApp:
                 self._ui_queue.get_nowait()()
         except queue.Empty:
             pass
-        finally:
-            self.root.after(100, self._drain_ui_queue)
 
     def _on_catalog(self, catalog):
         self.catalog = catalog
@@ -1621,8 +1692,21 @@ class LoaderApp:
         ItemTypePicker(self.root, self.icons, self.catalog, sorted(self.save.known_item_types()),
                        lambda ident: self.it_type.set(ident))
 
+    def _item_kind(self, item=None):
+        """'artifact', 'armor', 'melee', 'ranged' or None for the edited item."""
+        item = item if item is not None else self.current_item or {}
+        slot = item.get("equipmentSlot") or ""
+        if slot.startswith("Hotbar"):
+            return "artifact"
+        if slot in cat_mod.CATEGORY_SLOT.values():
+            return {v: k for k, v in cat_mod.CATEGORY_SLOT.items()}[slot]
+        return self.catalog.category(item.get("type", "")) if self.catalog else None
+
     def _pick_enchantment(self, index):
         if not self.save or self.current_item is None:
+            return
+        if self._item_kind() == "artifact" and not self.current_item.get("enchantments"):
+            messagebox.showinfo("Зачарования", "У артефактов нет зачарований.", parent=self.root)
             return
         slot = self.it_slot.get()
         category = self.catalog.category(self.it_type.get().strip()) if self.catalog else None
@@ -1634,7 +1718,9 @@ class LoaderApp:
             target.set(ident)
             if index is None:
                 self.gild_on.set(ident != gd.UNSET_ENCHANTMENT)
-            elif ident != gd.UNSET_ENCHANTMENT and _int(self.ench_vars[index][1], 0) == 0:
+            elif ident == gd.UNSET_ENCHANTMENT:
+                self.ench_vars[index][1].set("0")
+            elif _int(self.ench_vars[index][1], 0) == 0:
                 self.ench_vars[index][1].set("3")
                 base = index - index % 3
                 for j in range(base, base + 3):

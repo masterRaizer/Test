@@ -29,7 +29,12 @@ def find_saves(extra_roots=()):
         for path in glob.glob(os.path.join(root, "**", "*.dat"), recursive=True):
             if os.path.basename(os.path.dirname(path)).lower() == "characters":
                 found.add(os.path.normpath(path))
-    return sorted(found, key=os.path.getmtime, reverse=True)
+    def mtime(path):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0
+    return sorted(found, key=mtime, reverse=True)
 
 
 def read_profile(path):
@@ -348,7 +353,7 @@ def set_item_level(item, level):
 
 def set_enchantment(item, index, enchantment_id, level):
     enchants = item.setdefault("enchantments", [])
-    while len(enchants) < gd.ENCHANTMENTS_PER_ITEM:
+    while len(enchants) <= index:  # only grow when writing past the item's real slots
         enchants.append({"id": gd.UNSET_ENCHANTMENT, "level": 0})
     level = max(0, min(3, int(level)))
     ench = enchants[index]
@@ -362,7 +367,7 @@ def set_enchantment(item, index, enchantment_id, level):
     # Only one enchantment per slot may be active.
     if ench["level"] > 0:
         base = index - index % 3
-        for j in range(base, base + 3):
+        for j in range(base, min(base + 3, len(enchants))):
             if j != index:
                 enchants[j]["level"] = 0
                 if int(enchants[j].get("investedPoints") or 0) > 0:
@@ -378,15 +383,27 @@ def recompute_invested_points(item):
 
 
 def max_out_enchantments(item):
-    """Set the first real enchantment of each slot to level 3."""
-    enchants = item.get("enchantments") or []
-    for base in range(0, len(enchants), 3):
-        group = enchants[base:base + 3]
-        active = next((k for k, e in enumerate(group) if e.get("level") and e.get("id") != gd.UNSET_ENCHANTMENT), None)
-        if active is None:
-            active = next((k for k, e in enumerate(group) if e.get("id") != gd.UNSET_ENCHANTMENT), None)
-        if active is not None:
-            set_enchantment(item, base + active, group[active]["id"], 3)
+    """Raise the enchantments the player already chose to level 3.
+
+    Slots where nothing is chosen stay untouched: the three entries of a slot are the
+    options the game offered, not enchantments the item has.
+    """
+    changed = False
+    for i, e in enumerate(item.get("enchantments") or []):
+        if e.get("id") != gd.UNSET_ENCHANTMENT and 0 < int(e.get("level") or 0) < 3:
+            set_enchantment(item, i, e["id"], 3)
+            changed = True
+    return changed
+
+
+def clear_enchantments(item):
+    """Unchoose every enchantment of an item (the offered options stay)."""
+    changed = False
+    for i, e in enumerate(item.get("enchantments") or []):
+        if int(e.get("level") or 0):
+            set_enchantment(item, i, e.get("id"), 0)
+            changed = True
+    return changed
 
 
 def describe_item(item):

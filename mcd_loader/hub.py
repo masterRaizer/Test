@@ -45,6 +45,7 @@ class Hub:
         self.root, self.cfg, self.border = root, cfg, border
         self.initial_save = initial_save
         self.module = None
+        self._opening = False  # a module is being opened (ignore repeated clicks)
         self._queue = queue.Queue()
         self.art = {g["id"]: art.cached_game_art(g["id"], ART_DIR) for g in GAMES}
         self.animator = chrome.Animator(root)
@@ -92,7 +93,11 @@ class Hub:
 
     def _download_art(self):
         for g in GAMES:
-            found = art.fetch_game_art(g["id"], ART_DIR)
+            try:
+                found = art.fetch_game_art(g["id"], ART_DIR)
+            except Exception:
+                logging.exception("art download failed for %s", g["id"])
+                continue
             if found != self.art.get(g["id"]):
                 self._queue.put(lambda gid=g["id"], f=found: self._on_art(gid, f))
 
@@ -430,6 +435,9 @@ class Hub:
         if g["status"] != "ready":
             messagebox.showinfo(g["title"], "Модуль для этой игры пока в разработке.", parent=self.root)
             return
+        if self._opening or self.module_host.winfo_ismapped():
+            return
+        self._opening = True
         view = shell.LoadingView(self.root, title=g["title"].upper(), status="Загрузка модуля")
         view.place(relx=0, rely=0, relwidth=1, relheight=1)
         view.raise_view()
@@ -443,6 +451,7 @@ class Hub:
                                             border=self.border, host=self.module_host, on_back=self.back_to_hub)
                 except Exception as e:
                     logging.exception("module %s failed", gid)
+                    self._opening = False
                     view.stop()
                     view.destroy()
                     messagebox.showerror(g["title"], f"Не удалось загрузить модуль: {e}", parent=self.root)
@@ -458,6 +467,7 @@ class Hub:
                 self.module_host.pack(fill="both", expand=True)
                 view.stop()
                 view.destroy()
+                self._opening = False
                 self.root.protocol("WM_DELETE_WINDOW", self.on_close)
                 chrome.fade(self.animator, self.root, 0.0, self.alpha, 240)
             chrome.fade(self.animator, self.root, float(self.root.attributes("-alpha")), 0.0, 150, done=flip)

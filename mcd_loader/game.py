@@ -47,16 +47,28 @@ def load_config():
     cfg = dict(DEFAULT_CONFIG)
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            stored = json.load(f)
     except (OSError, ValueError):
-        pass
+        return cfg
+    if not isinstance(stored, dict):
+        return cfg
+    for key, value in stored.items():
+        default = DEFAULT_CONFIG.get(key)
+        if default is None or isinstance(value, type(default)) or \
+                (isinstance(default, float) and isinstance(value, int) and not isinstance(value, bool)):
+            cfg[key] = value  # keep known keys only with a sensible type; unknown keys pass through
+    if cfg.get("hotkey") not in VK_CODES:
+        cfg["hotkey"] = DEFAULT_CONFIG["hotkey"]
+    cfg["overlay_alpha"] = min(1.0, max(0.3, float(cfg["overlay_alpha"])))
     return cfg
 
 
 def save_config(cfg):
     os.makedirs(APP_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_PATH)
 
 
 def candidate_game_paths():

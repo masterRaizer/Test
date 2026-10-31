@@ -196,5 +196,57 @@ class PortalTests(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class EnchantmentRegressionTests(unittest.TestCase):
+    """The game stores three offered options per slot; only level > 0 marks the chosen one."""
+
+    def offered(self):
+        return {"type": "Sword", "power": 2.0, "rarity": "Common", "enchantments": [
+            {"id": "Sharpness", "level": 0}, {"id": "Looting", "level": 2}, {"id": "Echo", "level": 0}]}
+
+    def test_max_out_keeps_unchosen_options(self):
+        from mcd_loader.savefile import max_out_enchantments
+        item = self.offered()
+        item["enchantments"][1]["level"] = 0
+        self.assertFalse(max_out_enchantments(item))
+        self.assertEqual([e["level"] for e in item["enchantments"]], [0, 0, 0])
+        item["enchantments"][1]["level"] = 2
+        self.assertTrue(max_out_enchantments(item))
+        self.assertEqual([e["level"] for e in item["enchantments"]], [0, 3, 0])
+
+    def test_set_enchantment_on_short_list_does_not_pad_or_crash(self):
+        item = self.offered()
+        set_enchantment(item, 0, "Sharpness", 3)
+        self.assertEqual(len(item["enchantments"]), 3)
+        self.assertEqual([e["level"] for e in item["enchantments"]], [3, 0, 0])
+
+    def test_clear_enchantments(self):
+        from mcd_loader.savefile import clear_enchantments
+        item = self.offered()
+        self.assertTrue(clear_enchantments(item))
+        self.assertEqual([e["level"] for e in item["enchantments"]], [0, 0, 0])
+        self.assertEqual([e["id"] for e in item["enchantments"]], ["Sharpness", "Looting", "Echo"])
+
+
+class ConfigTests(unittest.TestCase):
+    def test_bad_values_fall_back_to_defaults(self):
+        from unittest import mock
+        from mcd_loader import game
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "config.json")
+            with open(path, "w") as f:
+                json.dump({"overlay_alpha": "x", "hotkey": "Q", "backup_on_apply": False, "paks_dir": 5,
+                           "custom": 1}, f)
+            with mock.patch.object(game, "CONFIG_PATH", path):
+                cfg = game.load_config()
+            self.assertEqual(cfg["overlay_alpha"], game.DEFAULT_CONFIG["overlay_alpha"])
+            self.assertEqual(cfg["hotkey"], "F8")
+            self.assertFalse(cfg["backup_on_apply"])
+            self.assertEqual(cfg["paks_dir"], "")
+            self.assertEqual(cfg["custom"], 1)
+        finally:
+            shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -318,7 +318,7 @@ class GameCatalog:
         try:
             with open(cache_file, encoding="utf-8") as f:
                 cached = json.load(f)
-            if cached.get("fingerprint") == fingerprint and cached.get("language") == language \
+            if cached.get("fingerprint") == fingerprint and cached.get("requested_language") == language \
                     and cached.get("schema") == CATALOG_SCHEMA:
                 cat._from_dict(cached)
                 return cat
@@ -326,11 +326,16 @@ class GameCatalog:
             pass
         index = cat.index()
         items, enchantments, props, locres = scan_paths(index.paths())
+        if not items:
+            raise ue4pak.PakError("в файлах игры не найдено ни одного предмета — возможно, другая версия игры")
         cat.items, cat.enchantments, cat.armor_properties = items, enchantments, props
         cat.version = index.version_label
         cat.language, cat.strings = cat._load_strings(index, locres, language)
-        with open(cache_file, "w", encoding="utf-8") as f:
-            json.dump(dict(cat._to_dict(), fingerprint=fingerprint, schema=CATALOG_SCHEMA), f, ensure_ascii=False)
+        tmp = cache_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(dict(cat._to_dict(), fingerprint=fingerprint, schema=CATALOG_SCHEMA, requested_language=language),
+                      f, ensure_ascii=False)
+        os.replace(tmp, cache_file)
         return cat
 
     def _load_strings(self, index, locres, language):

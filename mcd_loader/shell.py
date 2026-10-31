@@ -18,6 +18,7 @@ class Borderless:
         self._drag = None
         self._normal_geometry = None
         self.maximized = False
+        self._restoring = False
         root.overrideredirect(True)
         root.after(10, self._as_app_window)
         root.bind("<Map>", self._on_map, add="+")
@@ -49,9 +50,18 @@ class Borderless:
         region = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, 16, 16)
         ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
 
-    def _on_map(self, _event=None):
-        if not self.root.overrideredirect():
-            self.root.after(10, lambda: (self.root.overrideredirect(True), self._as_app_window()))
+    def _on_map(self, event=None):
+        # <Map> bound on the root also fires for every child widget: react to the window itself, once.
+        if event is not None and event.widget is not self.root:
+            return
+        if not self.root.overrideredirect() and not self._restoring:
+            self._restoring = True
+
+            def restore():
+                self.root.overrideredirect(True)
+                self._as_app_window()
+                self._restoring = False
+            self.root.after(10, restore)
 
     def minimize(self):
         self.root.overrideredirect(False)
