@@ -123,9 +123,9 @@ class LoaderApp:
         self._every("queue", 100, self._drain_ui_queue)
         self.load_catalog()
         if cfg.get("wasd_enabled"):
-            self.root.after(500, lambda: self.set_wasd(True))
-        self.root.after(80, self._highlight_nav)
-        self.root.after(300, self.run_checks)
+            self._later(500, lambda: self.set_wasd(True))
+        self._later(80, self._highlight_nav)
+        self._later(300, self.run_checks)
 
     # ------------------------------------------------------------------ UI
     def _build_header(self, parent):
@@ -1469,6 +1469,15 @@ class LoaderApp:
             self.show()
         else:
             self.hide()
+
+    def _later(self, ms, fn):
+        """One-shot after() that shutdown() cancels if it has not run yet."""
+        key = object()
+
+        def run():
+            self._jobs.pop(key, None)
+            fn()
+        self._jobs[key] = self.root.after(ms, run)
 
     def _every(self, key, ms, fn):
         """Run fn every ms milliseconds until shutdown()."""

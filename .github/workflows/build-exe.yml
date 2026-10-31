@@ -37,11 +37,11 @@ jobs:
         run: python -c "import mcd_loader.overlay, mcd_loader.wasd as w; p = w.driver_installer(); print(p); assert p"
 
       - name: Build Launcher.exe
-        run: python -m PyInstaller --noconfirm --onefile --windowed --name Launcher --icon mcd_loader/assets/launcher.ico --collect-data mcd_loader --collect-all vgamepad --hidden-import PIL._tkinter_finder launcher.py
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name Launcher --icon mcd_loader/assets/launcher.ico --collect-data mcd_loader --collect-all vgamepad --hidden-import vgamepad.api --hidden-import vgamepad.win.vigem_client --hidden-import vgamepad.win.virtual_gamepad --hidden-import PIL._tkinter_finder launcher.py
 
       - name: Check bundled assets
         shell: bash
-        run: python -c "import sys; d=open('dist/Launcher.exe','rb').read(); [sys.exit('missing ' + n) for n in ('logo.png', 'launcher.ico', 'ViGEmBusSetup_x64.msi') if n.encode() not in d]"
+        run: python -c "import sys; d=open('dist/Launcher.exe','rb').read(); [sys.exit('missing ' + n) for n in ('logo.png', 'launcher.ico', 'ViGEmBusSetup_x64.msi', 'ViGEmClient.dll', 'vgamepad.win.virtual_gamepad', 'vgamepad.win.vigem_client') if n.encode() not in d]"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -56,5 +56,5 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/Launcher.exe \
             --target "${{ github.sha }}" \
-            --title "MCD Loader — последняя сборка" \
+            --title "SecretGear — последняя сборка" \
             --notes "Сборка из коммита ${{ github.sha }}. Скачайте Launcher.exe и запустите. Windows может показать предупреждение SmartScreen (файл не подписан): «Подробнее» → «Выполнить в любом случае»."

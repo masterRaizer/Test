@@ -14,7 +14,8 @@ BLANK = os.path.join(os.path.dirname(__file__), "data", "Blank.dat")
 
 
 def make_save(path, items):
-    profile = json.loads(crypto.decrypt(open(BLANK, "rb").read()))
+    with open(BLANK, "rb") as f:
+        profile = json.loads(crypto.decrypt(f.read()))
     profile["items"] = items
     profile["name"] = os.path.basename(path)
     with open(path, "wb") as f:
