@@ -2,9 +2,9 @@
 import tkinter as tk
 from tkinter import ttk
 
-from . import catalog as cat_mod, gamedata as gd
+from . import catalog as cat_mod, gamedata as gd, theme
 
-BG, PANEL, FG, MUTED = "#1e1f24", "#2a2c33", "#e8e8e8", "#9aa0a6"
+BG, PANEL, FG, MUTED = theme.PAGE, theme.INPUT, theme.FG, theme.MUTED
 RARITY_COLORS = {"Common": "#e8e8e8", "Rare": "#4fc3f7", "Unique": "#ffb74d"}
 ALL = "Все"
 
@@ -25,7 +25,7 @@ class IconCache:
     def placeholder(self, size):
         if size not in self._placeholders:
             img = tk.PhotoImage(master=self.root, width=size, height=size)
-            img.put("#3a3d45", to=(2, 2, size - 2, size - 2))
+            img.put(theme.INPUT, to=(2, 2, size - 2, size - 2))
             self._placeholders[size] = img
         return self._placeholders[size]
 
@@ -78,6 +78,7 @@ class _Picker(tk.Toplevel):
         self.transient(parent)
         parent.update_idletasks()
         self.geometry(f"+{parent.winfo_rootx() + 40}+{parent.winfo_rooty() + 40}")
+        self.configure(padx=14, pady=12)
         self.icons = icons
         self.on_pick = on_pick
         self.keep_open = keep_open
@@ -86,7 +87,8 @@ class _Picker(tk.Toplevel):
 
         top = ttk.Frame(self)
         top.pack(fill="x")
-        ttk.Label(top, text="Поиск:").pack(side="left")
+        ttk.Label(top, text=title, style="Section.TLabel").pack(side="left", padx=(0, 16))
+        ttk.Label(top, text="⌕").pack(side="left")
         self.search = tk.StringVar()
         entry = ttk.Entry(top, textvariable=self.search, width=30)
         entry.pack(side="left", padx=6)

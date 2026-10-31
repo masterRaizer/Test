@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "language": "ru-RU",
     "wasd_enabled": False,
     "wasd_arrows": True,
+    "wasd_shift": True,
 }
 
 # Virtual-key codes for the hotkeys offered in settings.

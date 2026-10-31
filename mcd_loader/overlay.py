@@ -7,13 +7,13 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import catalog as cat_mod, game, gamedata as gd
+from . import catalog as cat_mod, game, gamedata as gd, theme
 from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
 from .wasd import WasdMovement, WasdUnavailable
 from .savefile import (SaveFile, find_saves, item_level, max_out_enchantments,
                        read_profile, recompute_invested_points, set_enchantment, set_item_level)
 
-BG, PANEL, FG, MUTED, ACCENT, WARN = "#1e1f24", "#2a2c33", "#e8e8e8", "#9aa0a6", "#3fa66b", "#d9a441"
+BG, PANEL, FG, MUTED, ACCENT, WARN = theme.PAGE, theme.INPUT, theme.FG, theme.MUTED, theme.ACCENT, theme.WARN
 NO_SLOT = "(не надет)"
 LOCATIONS = {"inventory": "Инвентарь", "chest": "Сундук"}
 SLOT_NAMES = {"MeleeGear": "Ближнее", "RangedGear": "Дальнее", "ArmorGear": "Броня",
@@ -28,34 +28,10 @@ def _int(var, default=0):
         return default
 
 
-def apply_dark_theme(root):
-    style = ttk.Style(root)
-    style.theme_use("clam")
-    root.configure(bg=BG)
-    style.configure(".", background=BG, foreground=FG, fieldbackground=PANEL, bordercolor="#3a3d45",
-                    lightcolor=PANEL, darkcolor=PANEL, troughcolor=PANEL, arrowcolor=FG, insertcolor=FG)
-    style.configure("TNotebook", background=BG, borderwidth=0)
-    style.configure("TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(14, 6))
-    style.map("TNotebook.Tab", background=[("selected", BG)], foreground=[("selected", FG)])
-    style.configure("TButton", background=PANEL, padding=(10, 4))
-    style.map("TButton", background=[("active", "#353842")])
-    style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff")
-    style.map("Accent.TButton", background=[("active", "#4cbb7c")])
-    style.configure("TLabelframe", background=BG)
-    style.configure("TLabelframe.Label", background=BG, foreground=MUTED)
-    style.configure("Muted.TLabel", foreground=MUTED)
-    style.configure("Warn.TLabel", foreground=WARN)
-    style.configure("Big.TLabel", font=("Segoe UI", 13, "bold"))
-    style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=30)
-    style.configure("Ench.TButton", anchor="w", padding=(4, 1))
-    style.configure("Treeview.Heading", background="#33363e", foreground=FG)
-    style.map("Treeview", background=[("selected", "#3d5a80")])
-    style.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)])
-    root.option_add("*TCombobox*Listbox.background", PANEL)
-    root.option_add("*TCombobox*Listbox.foreground", FG)
-
-
 class LoaderApp:
+    PAGES = [("◉", "Персонаж"), ("▦", "Инвентарь"), ("{ }", "JSON"), ("⚙", "Настройки"), ("✦", "Моды")]
+    NAV_ORDER = [0, 1, 4, 2, 3]  # sidebar order: character, inventory, mods, JSON, settings
+
     def __init__(self, root, cfg, initial_save=None):
         self.root = root
         self.cfg = cfg
@@ -68,30 +44,39 @@ class LoaderApp:
         self._suspend_traces = False
         self.catalog = None
         self.icons = IconCache(root)
-        self.wasd = WasdMovement(arrows=cfg.get("wasd_arrows", True))
+        self.wasd = WasdMovement(arrows=cfg.get("wasd_arrows", True), shift_walk=cfg.get("wasd_shift", True))
         self._icon_thread_stop = threading.Event()
         self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
 
         root.title("MCD Loader — Minecraft Dungeons")
-        root.geometry("1280x760")
-        root.minsize(1100, 640)
+        root.geometry("1320x800")
+        root.minsize(1180, 680)
         root.attributes("-topmost", True)
         try:
             root.attributes("-alpha", float(cfg.get("overlay_alpha", 0.95)))
         except tk.TclError:
             pass
-        apply_dark_theme(root)
+        theme.apply_theme(root)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-s>", lambda e: self.apply_to_game())
         root.bind("<Escape>", lambda e: self.hide() if self.hotkey.available else None)
 
-        self._build_topbar()
-        self.notebook = ttk.Notebook(root)
-        self.notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self._build_header()
+        body = ttk.Frame(root, style="Window.TFrame")
+        body.pack(fill="both", expand=True)
+        self._build_sidebar(body)
+        content = ttk.Frame(body, padding=(14, 10, 14, 12))
+        content.pack(side="left", fill="both", expand=True)
+        self.status_var = tk.StringVar(value="Выберите персонажа")
+        self.status = ttk.Label(content, textvariable=self.status_var, style="Muted.TLabel")
+        self.status.pack(fill="x", pady=(0, 8))
+        self.notebook = ttk.Notebook(content, style="Hidden.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
         self._build_character_tab()
         self._build_inventory_tab()
         self._build_json_tab()
         self._build_settings_tab()
+        self._build_mods_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.refresh_save_list(select=initial_save or cfg.get("last_save"))
@@ -103,36 +88,61 @@ class LoaderApp:
             self.root.after(500, lambda: self.set_wasd(True))
 
     # ------------------------------------------------------------------ UI
-    def _build_topbar(self):
-        bar = ttk.Frame(self.root, padding=(8, 8, 8, 4))
+    def _build_header(self):
+        bar = ttk.Frame(self.root, style="Window.TFrame", padding=(22, 12, 14, 12))
         bar.pack(fill="x")
-        ttk.Label(bar, text="Персонаж:").pack(side="left")
+        ttk.Label(bar, text="MCD LOADER", style="Title.TLabel").pack(side="left", padx=(0, 28))
         self.save_var = tk.StringVar()
-        self.save_box = ttk.Combobox(bar, textvariable=self.save_var, state="readonly", width=48)
-        self.save_box.pack(side="left", padx=6)
+        self.save_box = ttk.Combobox(bar, textvariable=self.save_var, state="readonly", width=40)
+        self.save_box.pack(side="left")
         self.save_box.bind("<<ComboboxSelected>>", lambda e: self.open_selected_save())
-        ttk.Button(bar, text="⟳ Обновить", command=self.reload_save).pack(side="left", padx=2)
-        ttk.Button(bar, text="Открыть .dat…", command=self.browse_save).pack(side="left", padx=2)
-        ttk.Button(bar, text="✔ Применить в игре  (Ctrl+S)", style="Accent.TButton",
-                   command=self.apply_to_game).pack(side="left", padx=8)
-        ttk.Button(bar, text="▶ Запустить игру", command=self.start_game).pack(side="right")
-        hint = f"{self.cfg.get('hotkey', 'F8')} — показать/скрыть" if self.hotkey.available else ""
-        ttk.Label(bar, text=hint, style="Muted.TLabel").pack(side="right", padx=10)
+        ttk.Button(bar, text="⟳", style="Icon.TButton", width=3, command=self.reload_save).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="…", style="Icon.TButton", width=3, command=self.browse_save).pack(side="left")
+        ttk.Button(bar, text="⌕", style="Icon.TButton", width=3, command=self.add_item).pack(side="right")
+        ttk.Button(bar, text="⚙", style="Icon.TButton", width=3, command=lambda: self.show_page(3)).pack(side="right")
+        ttk.Button(bar, text="▶  Игра", command=self.start_game).pack(side="right", padx=(0, 10))
+        ttk.Button(bar, text="✔  Применить в игре", style="Accent.TButton",
+                   command=self.apply_to_game).pack(side="right", padx=(0, 8))
+        hint = f"{self.cfg.get('hotkey', 'F8')} — показать / скрыть" if self.hotkey.available else ""
+        ttk.Label(bar, text=hint, style="WindowMuted.TLabel").pack(side="right", padx=12)
+        tk.Frame(self.root, bg=theme.BORDER, height=1).pack(fill="x")
 
-        self.status_var = tk.StringVar(value="Выберите персонажа")
-        self.status = ttk.Label(self.root, textvariable=self.status_var, style="Muted.TLabel", padding=(10, 0, 10, 6))
-        self.status.pack(fill="x")
+    def _build_sidebar(self, parent):
+        side = ttk.Frame(parent, style="Window.TFrame", padding=(10, 14, 10, 10))
+        side.pack(side="left", fill="y")
+        self.nav_buttons = {}
+        for index in self.NAV_ORDER:
+            icon, title = self.PAGES[index]
+            button = ttk.Button(side, text=f"{icon:<3}  {title}", style="Nav.TButton", width=16,
+                                command=lambda i=index: self.show_page(i))
+            button.pack(fill="x", pady=2)
+            self.nav_buttons[index] = button
+        tk.Frame(parent, bg=theme.BORDER, width=1).pack(side="left", fill="y")
+
+    def show_page(self, index):
+        self.notebook.select(index)
+
+    def _highlight_nav(self):
+        current = self.notebook.index("current")
+        for index, button in self.nav_buttons.items():
+            button.configure(style="NavActive.TButton" if index == current else "Nav.TButton")
 
     def _labeled(self, parent, row, text, widget):
         ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 12))
         widget.grid(row=row, column=1, sticky="we", pady=4)
         return widget
 
+    def _page(self, title):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text=title)
+        return tab
+
     def _build_character_tab(self):
-        tab = ttk.Frame(self.notebook, padding=16)
-        self.notebook.add(tab, text="Персонаж")
-        form = ttk.Frame(tab)
-        form.pack(side="left", anchor="n")
+        tab = self._page("Персонаж")
+        left = ttk.Frame(tab)
+        left.pack(side="left", fill="y", anchor="n", padx=(0, 14))
+        right = ttk.Frame(tab)
+        right.pack(side="left", fill="y", anchor="n")
 
         self.name_var = tk.StringVar()
         self.level_var = tk.StringVar()
@@ -141,77 +151,87 @@ class LoaderApp:
         self.difficulty_var = tk.StringVar()
         self.threat_var = tk.StringVar()
 
-        ttk.Label(form, textvariable=self.name_var, style="Big.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        self._labeled(form, 1, "Уровень", ttk.Spinbox(form, from_=1, to=10000, textvariable=self.level_var, width=18))
-        self._labeled(form, 2, "Опыт (XP)", ttk.Entry(form, textvariable=self.xp_var, width=20))
-        for row, (key, title) in enumerate(gd.CURRENCIES.items(), start=3):
-            self._labeled(form, row, title, ttk.Entry(form, textvariable=self.currency_vars[key], width=20))
-        self._labeled(form, 6, "Открытая сложность",
-                      ttk.Combobox(form, textvariable=self.difficulty_var, state="readonly", width=18,
-                                   values=[f"{d} — {gd.DIFFICULTY_NAMES[d]}" for d in gd.DIFFICULTIES]))
-        self._labeled(form, 7, "Уровень угрозы", ttk.Combobox(form, textvariable=self.threat_var, values=gd.THREAT_LEVELS,
-                                                              state="readonly", width=18))
+        theme.section(left, "◉", "Персонаж")
+        body = theme.card(left, "Характеристики", pack={"fill": "x", "pady": (0, 10), "ipadx": 0})
+        ttk.Label(body, textvariable=self.name_var, style="Card.TLabel", font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        theme.card_row(body, 1, "Уровень", ttk.Spinbox(body, from_=1, to=10000, textvariable=self.level_var, width=16))
+        theme.card_row(body, 2, "Опыт (XP)", ttk.Entry(body, textvariable=self.xp_var, width=18))
+        body = theme.card(left, "Валюта")
+        for row, (key, title) in enumerate(gd.CURRENCIES.items()):
+            theme.card_row(body, row, title, ttk.Entry(body, textvariable=self.currency_vars[key], width=18))
+        body = theme.card(left, "Прогресс")
+        theme.card_row(body, 0, "Открытая сложность",
+                       ttk.Combobox(body, textvariable=self.difficulty_var, state="readonly", width=24,
+                                    values=[f"{d} — {gd.DIFFICULTY_NAMES[d]}" for d in gd.DIFFICULTIES]))
+        theme.card_row(body, 1, "Уровень угрозы", ttk.Combobox(body, textvariable=self.threat_var,
+                                                               values=gd.THREAT_LEVELS, state="readonly", width=24))
         self.level_var.trace_add("write", self._on_level_changed)
         self.xp_var.trace_add("write", self._on_xp_changed)
 
-        info = ttk.LabelFrame(tab, text="Сводка", padding=12)
-        info.pack(side="left", anchor="n", padx=24)
+        theme.section(right, "★", "Сводка")
+        info = theme.card(right, "Персонаж сейчас", pack={"fill": "x", "pady": (0, 10)})
         self.power_var = tk.StringVar()
         self.points_var = tk.StringVar()
         self.items_count_var = tk.StringVar()
         for var in (self.power_var, self.points_var, self.items_count_var):
-            ttk.Label(info, textvariable=var).pack(anchor="w", pady=3)
-
-        quick = ttk.LabelFrame(tab, text="Быстрые действия", padding=12)
-        quick.pack(side="left", anchor="n")
-        ttk.Button(quick, text="Изумруды / золото = 999 999", command=self._quick_rich).pack(fill="x", pady=2)
-        ttk.Button(quick, text="Открыть все сложности и угрозы", command=self._quick_unlock).pack(fill="x", pady=2)
-        ttk.Button(quick, text="Уровень персонажа = 100", command=lambda: self.level_var.set("100")).pack(fill="x", pady=2)
+            ttk.Label(info, textvariable=var, style="Card.TLabel").pack(anchor="w", pady=3)
+        quick = theme.card(right, "Быстрые действия")
+        for text, cmd in (("Изумруды и золото = 999 999", self._quick_rich),
+                          ("Открыть все сложности и угрозы", self._quick_unlock),
+                          ("Уровень персонажа = 100", lambda: self.level_var.set("100")),
+                          ("Все предметы: уровень…", self.set_all_levels),
+                          ("Все зачарования на уровень 3", self.max_all_enchantments)):
+            ttk.Button(quick, text=text, command=cmd, width=34).pack(fill="x", pady=3)
 
     def _build_inventory_tab(self):
-        tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="Инвентарь")
+        tab = self._page("Инвентарь")
         self._build_item_editor(tab)
         left = ttk.Frame(tab)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        left.pack(side="left", fill="both", expand=True, padx=(0, 14))
         actions = ttk.Frame(left)
-        actions.pack(side="bottom", fill="x", pady=(6, 0))
-        for i, (text, cmd) in enumerate((("＋ Добавить предмет…", self.add_item), ("⧉ Дублировать", self.duplicate_item),
-                                         ("✕ Удалить", self.delete_item), ("⇄ Сундук/инвентарь", self.move_item),
-                                         ("Все: уровень…", self.set_all_levels),
-                                         ("Все: зачар. ур. 3", self.max_all_enchantments))):
-            ttk.Button(actions, text=text, command=cmd).grid(row=i // 3, column=i % 3, sticky="we", padx=2, pady=2)
-            actions.columnconfigure(i % 3, weight=1)
+        actions.pack(side="bottom", fill="x", pady=(8, 0))
+        for i, (text, cmd, style) in enumerate((("＋  Добавить", self.add_item, "Accent.TButton"),
+                                                ("⧉  Копия", self.duplicate_item, "TButton"),
+                                                ("✕  Удалить", self.delete_item, "TButton"),
+                                                ("⇄  Переложить", self.move_item, "TButton"))):
+            ttk.Button(actions, text=text, command=cmd, style=style).grid(row=i // 2, column=i % 2, sticky="we",
+                                                                          padx=3, pady=3)
+            actions.columnconfigure(i % 2, weight=1)
 
         top = ttk.Frame(left)
-        top.pack(fill="x", pady=(0, 6))
-        ttk.Label(top, text="Показать:").pack(side="left")
+        top.pack(fill="x", pady=(0, 8))
+        theme.section(top, "▦", "Инвентарь и сундук", side="left")
         self.filter_var = tk.StringVar(value=FILTERS[0])
         flt = ttk.Combobox(top, textvariable=self.filter_var, values=FILTERS, state="readonly", width=12)
-        flt.pack(side="left", padx=6)
+        flt.pack(side="right")
         flt.bind("<<ComboboxSelected>>", lambda e: self.refresh_items())
 
+        frame = tk.Frame(left, bg=theme.BORDER, padx=1, pady=1)
+        frame.pack(fill="both", expand=True)
         cols = ("slot", "lvl", "ench")
-        self.tree = ttk.Treeview(left, columns=cols, show="tree headings", selectmode="browse")
+        self.tree = ttk.Treeview(frame, columns=cols, show="tree headings", selectmode="browse",
+                                 displaycolumns=("slot", "lvl"))
         self.tree.heading("#0", text="Предмет")
-        self.tree.column("#0", width=200)
-        for col, title, width in zip(cols, ("Где", "Ур.", "Зачарования"), (95, 40, 160)):
+        self.tree.column("#0", width=210)
+        for col, title, width in zip(cols, ("Где", "Ур.", "Зачарования"), (100, 44, 170)):
             self.tree.heading(col, text=title)
             self.tree.column(col, width=width, stretch=col == "ench")
-        scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_item_selected)
 
     def _build_item_editor(self, parent):
-        ed = ttk.LabelFrame(parent, text="Предмет", padding=10)
+        ed = ttk.Frame(parent)
         ed.pack(side="right", fill="y")
-        self.editor = ed
-        col_a = ttk.Frame(ed)
-        col_a.pack(side="left", fill="y", anchor="n")
-        col_b = ttk.Frame(ed)
-        col_b.pack(side="left", fill="y", anchor="n", padx=(10, 0))
+        self.editor = theme.section(ed, "⚔", "Предмет")
+        cols = ttk.Frame(ed)
+        cols.pack(fill="both", expand=True)
+        col_a = theme.card(cols, "Основное", pack={"side": "left", "fill": "y", "anchor": "n"})
+        col_b_outer = ttk.Frame(cols)
+        col_b_outer.pack(side="left", fill="y", anchor="n", padx=(10, 0))
         self.it_type = tk.StringVar()
         self.it_level = tk.StringVar()
         self.it_rarity = tk.StringVar()
@@ -220,149 +240,186 @@ class LoaderApp:
         self.it_gifted = tk.BooleanVar()
         self.it_new = tk.BooleanVar()
 
-        head = ttk.Frame(col_a)
-        head.pack(fill="x", pady=(0, 6))
-        self.item_icon = ttk.Label(head, image=self.icons.placeholder(64))
+        head = ttk.Frame(col_a, style="Card.TFrame")
+        head.pack(fill="x", pady=(0, 8))
+        self.item_icon = ttk.Label(head, image=self.icons.placeholder(64), style="Card.TLabel")
         self.item_icon.pack(side="left")
-        self.item_title = ttk.Label(head, text="—", style="Big.TLabel", wraplength=230)
-        self.item_title.pack(side="left", padx=8)
-        grid = ttk.Frame(col_a)
+        self.item_title = ttk.Label(head, text="—", style="Card.TLabel", font=("Segoe UI", 13, "bold"), wraplength=210)
+        self.item_title.pack(side="left", padx=10)
+        grid = ttk.Frame(col_a, style="Card.TFrame")
         grid.pack(fill="x")
-        type_row = ttk.Frame(grid)
+        type_row = ttk.Frame(grid, style="Card.TFrame")
         self.type_box = ttk.Combobox(type_row, textvariable=self.it_type, width=17)
         self.type_box.pack(side="left")
-        ttk.Button(type_row, text="…", width=2, command=self._pick_type).pack(side="left", padx=(2, 0))
-        self._labeled(grid, 0, "Тип (ID)", type_row)
+        ttk.Button(type_row, text="…", width=2, command=self._pick_type).pack(side="left", padx=(3, 0))
+        theme.card_row(grid, 0, "Тип (ID)", type_row, muted=True)
         self.it_type.trace_add("write", lambda *_: self._update_item_header())
-        self._labeled(grid, 1, "Уровень силы", ttk.Spinbox(grid, from_=0, to=10000, textvariable=self.it_level, width=10))
-        self._labeled(grid, 2, "Редкость", ttk.Combobox(grid, textvariable=self.it_rarity, values=gd.RARITIES, state="readonly", width=12))
-        self._labeled(grid, 3, "Слот", ttk.Combobox(grid, textvariable=self.it_slot, values=[NO_SLOT] + gd.EQUIPMENT_SLOTS,
-                                                    state="readonly", width=14))
-        flags = ttk.Frame(col_a)
-        flags.pack(fill="x", pady=4)
-        for text, var in (("Улучшен (алмаз)", self.it_upgraded), ("Подарок", self.it_gifted), ("Новый", self.it_new)):
-            ttk.Checkbutton(flags, text=text, variable=var).pack(anchor="w")
+        theme.card_row(grid, 1, "Уровень силы", ttk.Spinbox(grid, from_=0, to=10000, textvariable=self.it_level,
+                                                             width=19), muted=True)
+        theme.card_row(grid, 2, "Редкость", ttk.Combobox(grid, textvariable=self.it_rarity, values=gd.RARITIES,
+                                                         state="readonly", width=19), muted=True)
+        theme.card_row(grid, 3, "Слот", ttk.Combobox(grid, textvariable=self.it_slot, state="readonly", width=19,
+                                                     values=[NO_SLOT] + gd.EQUIPMENT_SLOTS), muted=True)
+        for row, (text, var) in enumerate((("Улучшен (алмаз)", self.it_upgraded), ("Подарок", self.it_gifted),
+                                           ("Отмечен как новый", self.it_new)), start=4):
+            theme.card_row(grid, row, text, theme.Toggle(grid, var), muted=True)
 
-        ench = ttk.Frame(col_b)
-        ench.pack(fill="x")
+        gild = ttk.Frame(col_a, style="Card.TFrame")
+        gild.pack(fill="x", pady=(10, 0))
+        self.gild_on = tk.BooleanVar()
+        self.gild_id = tk.StringVar()
+        self.gild_lvl = tk.StringVar(value="1")
+        ttk.Label(gild, text="Позолоченное (незерит)", style="CardMuted.TLabel").pack(side="left")
+        theme.Toggle(gild, self.gild_on).pack(side="right")
+        gild_row = ttk.Frame(col_a, style="Card.TFrame")
+        gild_row.pack(fill="x", pady=(4, 0))
+        self.gild_box = ttk.Button(gild_row, style="Ench.TButton", compound="left", width=22,
+                                   command=lambda: self._pick_enchantment(None))
+        self.gild_box.pack(side="left")
+        self.gild_id.trace_add("write", lambda *_: self._update_ench_button(self.gild_box, self.gild_id))
+        self._update_ench_button(self.gild_box, self.gild_id)
+        ttk.Spinbox(gild_row, from_=0, to=3, textvariable=self.gild_lvl, width=3).pack(side="left", padx=4)
+
+        ttk.Label(col_a, text="Свойства брони", style="CardMuted.TLabel").pack(anchor="w", pady=(10, 2))
+        self.props_list = tk.Listbox(col_a, height=3, bg=theme.INPUT, fg=FG, highlightthickness=0, bd=0,
+                                     selectbackground=theme.ACCENT, activestyle="none")
+        self.props_list.pack(fill="x")
+        row = ttk.Frame(col_a, style="Card.TFrame")
+        row.pack(fill="x", pady=(4, 0))
+        self.prop_id = tk.StringVar(value=gd.DEFAULT_ARMOR_PROPERTY)
+        self.prop_rarity = tk.StringVar(value="Common")
+        self.prop_box = ttk.Combobox(row, textvariable=self.prop_id, width=16)
+        self.prop_box.pack(side="left")
+        ttk.Combobox(row, textvariable=self.prop_rarity, values=gd.RARITIES, state="readonly",
+                     width=8).pack(side="left", padx=3)
+        ttk.Button(row, text="+", width=2, command=self._add_prop).pack(side="left")
+        ttk.Button(row, text="−", width=2, command=self._remove_prop).pack(side="left", padx=(3, 0))
+
         self.ench_vars = []
         self.ench_boxes = []
         for s in range(3):
-            frame = ttk.LabelFrame(ench, text=f"Зачарования, слот {s + 1}", padding=4)
-            frame.grid(row=s, column=0, sticky="we", pady=2)
+            body = theme.card(col_b_outer, f"Зачарования · слот {s + 1}", pack={"fill": "x", "pady": (0, 8)})
             for k in range(3):
                 index = s * 3 + k
                 id_var, lvl_var = tk.StringVar(value=gd.UNSET_ENCHANTMENT), tk.StringVar(value="0")
-                button = ttk.Button(frame, style="Ench.TButton", compound="left", width=22,
+                button = ttk.Button(body, style="Ench.TButton", compound="left", width=22,
                                     command=lambda i=index: self._pick_enchantment(i))
-                button.grid(row=k, column=0, padx=2, pady=1, sticky="we")
-                ttk.Spinbox(frame, from_=0, to=3, textvariable=lvl_var, width=4).grid(row=k, column=1, padx=2)
+                button.grid(row=k, column=0, pady=2, sticky="we")
+                ttk.Spinbox(body, from_=0, to=3, textvariable=lvl_var, width=3).grid(row=k, column=1, padx=(6, 0))
                 id_var.trace_add("write", lambda *_, b=button, v=id_var: self._update_ench_button(b, v))
                 self._update_ench_button(button, id_var)
                 self.ench_vars.append((id_var, lvl_var))
                 self.ench_boxes.append(button)
-
-        gild = ttk.LabelFrame(col_a, text="Позолоченное (незерит)", padding=4)
-        gild.pack(fill="x", pady=4)
-        self.gild_on = tk.BooleanVar()
-        self.gild_id = tk.StringVar()
-        self.gild_lvl = tk.StringVar(value="1")
-        ttk.Checkbutton(gild, variable=self.gild_on).pack(side="left")
-        self.gild_box = ttk.Button(gild, style="Ench.TButton", compound="left", width=17,
-                                   command=lambda: self._pick_enchantment(None))
-        self.gild_box.pack(side="left", padx=2)
-        self.gild_id.trace_add("write", lambda *_: self._update_ench_button(self.gild_box, self.gild_id))
-        self._update_ench_button(self.gild_box, self.gild_id)
-        ttk.Spinbox(gild, from_=0, to=3, textvariable=self.gild_lvl, width=4).pack(side="left")
-
-        props = ttk.LabelFrame(col_a, text="Свойства брони", padding=4)
-        props.pack(fill="x", pady=4)
-        self.props_list = tk.Listbox(props, height=3, bg=PANEL, fg=FG, highlightthickness=0, selectbackground="#3d5a80")
-        self.props_list.pack(fill="x")
-        row = ttk.Frame(props)
-        row.pack(fill="x", pady=2)
-        self.prop_id = tk.StringVar(value=gd.DEFAULT_ARMOR_PROPERTY)
-        self.prop_rarity = tk.StringVar(value="Common")
-        self.prop_box = ttk.Combobox(row, textvariable=self.prop_id, width=15)
-        self.prop_box.pack(side="left")
-        ttk.Combobox(row, textvariable=self.prop_rarity, values=gd.RARITIES, state="readonly", width=8).pack(side="left", padx=2)
-        ttk.Button(row, text="+", width=2, command=self._add_prop).pack(side="left")
-        ttk.Button(row, text="−", width=2, command=self._remove_prop).pack(side="left")
-
-        ttk.Button(col_b, text="Сохранить предмет", style="Accent.TButton",
-                   command=self.commit_item).pack(fill="x", pady=(8, 0))
+        ttk.Button(col_b_outer, text="Сохранить предмет", style="Accent.TButton",
+                   command=self.commit_item).pack(fill="x", pady=(2, 0))
 
     def _build_json_tab(self):
-        tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="JSON")
+        tab = self._page("JSON")
         bar = ttk.Frame(tab)
-        bar.pack(fill="x", pady=(0, 6))
-        ttk.Button(bar, text="Принять JSON в редактор", command=self.apply_json_text).pack(side="left")
-        ttk.Button(bar, text="Сбросить текст", command=self.refresh_json).pack(side="left", padx=6)
-        ttk.Label(bar, text="Полный доступ к данным сохранения. После правки нажмите «Принять», затем «Применить в игре».",
-                  style="Muted.TLabel").pack(side="left", padx=10)
-        self.json_text = tk.Text(tab, bg=PANEL, fg=FG, insertbackground=FG, wrap="none", undo=True,
-                                 font=("Consolas", 10), relief="flat")
+        bar.pack(fill="x", pady=(0, 8))
+        theme.section(bar, "{ }", "JSON сохранения", side="left")
+        ttk.Button(bar, text="Принять JSON", style="Accent.TButton", command=self.apply_json_text).pack(side="right")
+        ttk.Button(bar, text="Сбросить текст", command=self.refresh_json).pack(side="right", padx=6)
+        ttk.Label(tab, text="Полный доступ к данным. После правки нажмите «Принять JSON», затем «Применить в игре».",
+                  style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
+        frame = tk.Frame(tab, bg=theme.BORDER, padx=1, pady=1)
+        frame.pack(fill="both", expand=True)
+        self.json_text = tk.Text(frame, bg=theme.CARD, fg=FG, insertbackground=FG, wrap="none", undo=True,
+                                 font=("Consolas", 10), relief="flat", bd=8, selectbackground=theme.SELECT)
         self.json_text.pack(fill="both", expand=True)
 
     def _build_settings_tab(self):
-        tab = ttk.Frame(self.notebook, padding=16)
-        self.notebook.add(tab, text="Настройки")
+        tab = self._page("Настройки")
+        left = ttk.Frame(tab)
+        left.pack(side="left", fill="both", expand=True, anchor="n", padx=(0, 14))
+        right = ttk.Frame(tab)
+        right.pack(side="left", fill="both", expand=True, anchor="n")
         self.set_hotkey = tk.StringVar(value=self.cfg.get("hotkey", "F8"))
         self.set_game = tk.StringVar(value=self.cfg.get("game_path", ""))
         self.set_launch = tk.BooleanVar(value=self.cfg.get("launch_game", False))
         self.set_backup = tk.BooleanVar(value=self.cfg.get("backup_on_apply", True))
         self.set_alpha = tk.DoubleVar(value=self.cfg.get("overlay_alpha", 0.95))
-        self._labeled(tab, 0, "Горячая клавиша", ttk.Combobox(tab, textvariable=self.set_hotkey, values=list(game.VK_CODES),
-                                                              state="readonly", width=12))
-        path_row = ttk.Frame(tab)
-        ttk.Entry(path_row, textvariable=self.set_game, width=60).pack(side="left")
-        ttk.Button(path_row, text="…", width=3, command=self._browse_game).pack(side="left", padx=4)
-        self._labeled(tab, 1, "Путь к Dungeons.exe", path_row)
-        self._labeled(tab, 2, "", ttk.Checkbutton(tab, text="Запускать игру вместе с загрузчиком", variable=self.set_launch))
-        self._labeled(tab, 3, "", ttk.Checkbutton(tab, text="Резервная копия перед каждым применением", variable=self.set_backup))
-        self._labeled(tab, 4, "Прозрачность окна", ttk.Scale(tab, from_=0.5, to=1.0, variable=self.set_alpha,
-                                                              command=self._preview_alpha))
         self.set_paks = tk.StringVar(value=self.cfg.get("paks_dir", ""))
         self.set_pak_key = tk.StringVar(value=self.cfg.get("pak_key", ""))
         self.set_lang = tk.StringVar(value=self.cfg.get("language", "ru-RU"))
-        paks_row = ttk.Frame(tab)
-        ttk.Entry(paks_row, textvariable=self.set_paks, width=60).pack(side="left")
-        ttk.Button(paks_row, text="…", width=3, command=self._browse_paks).pack(side="left", padx=4)
-        ttk.Button(paks_row, text="Перечитать файлы игры", command=lambda: self.load_catalog(force=True)).pack(side="left")
-        self._labeled(tab, 8, "Папка Paks игры", paks_row)
-        self._labeled(tab, 9, "AES-ключ pak (если нужен)", ttk.Entry(tab, textvariable=self.set_pak_key, width=70))
-        self._labeled(tab, 10, "Язык названий", ttk.Combobox(tab, textvariable=self.set_lang, width=12,
-                                                              values=["ru-RU", "en", "de-DE", "fr-FR", "es-ES", "uk-UA"]))
-        self.catalog_status = tk.StringVar(value="Файлы игры: загрузка…")
-        ttk.Label(tab, textvariable=self.catalog_status, style="Muted.TLabel").grid(row=11, column=1, sticky="w")
 
-        wasd = ttk.LabelFrame(tab, text="Управление WASD (мод)", padding=8)
-        wasd.grid(row=12, column=0, columnspan=2, sticky="we", pady=(12, 0))
+        theme.section(left, "⚙", "Оверлей")
+        body = theme.card(left, "Окно поверх игры")
+        theme.card_row(body, 0, "Горячая клавиша", ttk.Combobox(body, textvariable=self.set_hotkey,
+                                                                values=list(game.VK_CODES), state="readonly", width=10),
+                       muted=True)
+        alpha_row = ttk.Frame(body, style="Card.TFrame")
+        ttk.Scale(alpha_row, from_=0.5, to=1.0, variable=self.set_alpha, length=150,
+                  command=self._preview_alpha).pack(side="left")
+        self.alpha_label = ttk.Label(alpha_row, width=5, anchor="center", style="Card.TLabel",
+                                     background=theme.INPUT, padding=(6, 3))
+        self.alpha_label.pack(side="left", padx=(10, 0))
+        self._preview_alpha()
+        theme.card_row(body, 1, "Прозрачность", alpha_row, muted=True)
+        body = theme.card(left, "Сохранения")
+        theme.card_row(body, 0, "Бэкап перед каждым применением", theme.Toggle(body, self.set_backup), muted=True)
+        buttons = ttk.Frame(body, style="Card.TFrame")
+        buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(buttons, text="Восстановить из бэкапа…", command=self.restore_backup).pack(side="left")
+        ttk.Button(buttons, text="Экспорт JSON…", command=self.export_json).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Импорт JSON…", command=self.import_json).pack(side="left")
+        ttk.Label(body, text=f"Бэкапы: {game.BACKUP_DIR}", style="CardMuted.TLabel", wraplength=480).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        body = theme.card(left, "Как применить изменения в игре")
+        ttk.Label(body, style="CardMuted.TLabel", justify="left", wraplength=500, text=(
+            "1. Выйдите из миссии в главное меню — игра сохранит персонажа.\n"
+            "2. Нажмите горячую клавишу, отредактируйте и нажмите «Применить в игре».\n"
+            "3. Выберите персонажа заново — загрузится изменённое сохранение.\n"
+            "Окно видно поверх игры в режиме «В окне» или «Полноэкранный в окне».")).pack(anchor="w")
+
+        theme.section(right, "▣", "Игра")
+        body = theme.card(right, "Файлы игры")
+        path_row = ttk.Frame(body, style="Card.TFrame")
+        ttk.Entry(path_row, textvariable=self.set_game, width=26).pack(side="left")
+        ttk.Button(path_row, text="…", width=2, command=self._browse_game).pack(side="left", padx=(3, 0))
+        theme.card_row(body, 0, "Dungeons.exe", path_row, muted=True)
+        paks_row = ttk.Frame(body, style="Card.TFrame")
+        ttk.Entry(paks_row, textvariable=self.set_paks, width=26).pack(side="left")
+        ttk.Button(paks_row, text="…", width=2, command=self._browse_paks).pack(side="left", padx=(3, 0))
+        theme.card_row(body, 1, "Папка Paks", paks_row, muted=True)
+        theme.card_row(body, 2, "AES-ключ (если нужен)", ttk.Entry(body, textvariable=self.set_pak_key, width=30),
+                       muted=True)
+        theme.card_row(body, 3, "Язык названий", ttk.Combobox(body, textvariable=self.set_lang, width=10,
+                                                              values=["ru-RU", "en", "de-DE", "fr-FR", "es-ES", "uk-UA"]),
+                       muted=True)
+        theme.card_row(body, 4, "Автозапуск игры", theme.Toggle(body, self.set_launch), muted=True)
+        self.catalog_status = tk.StringVar(value="Файлы игры: загрузка…")
+        ttk.Label(body, textvariable=self.catalog_status, style="CardMuted.TLabel", wraplength=480,
+                  justify="left").grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(body, text="Перечитать файлы игры", command=lambda: self.load_catalog(force=True)).grid(
+            row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(right, text="Сохранить настройки", style="Accent.TButton",
+                   command=self.save_settings).pack(anchor="e", pady=(4, 0))
+
+    def _build_mods_tab(self):
+        tab = self._page("Моды")
+        left = ttk.Frame(tab)
+        left.pack(side="left", fill="y", anchor="n")
+        theme.section(left, "✦", "Моды управления")
         self.set_wasd_on = tk.BooleanVar(value=False)
         self.set_wasd_arrows = tk.BooleanVar(value=self.cfg.get("wasd_arrows", True))
-        ttk.Checkbutton(wasd, text="Ходить на W/A/S/D (Shift — шагом)", variable=self.set_wasd_on,
-                        command=lambda: self.set_wasd(self.set_wasd_on.get())).pack(anchor="w")
-        ttk.Checkbutton(wasd, text="Стрелки тоже двигают персонажа", variable=self.set_wasd_arrows,
-                        command=self._wasd_options_changed).pack(anchor="w")
+        self.set_wasd_shift = tk.BooleanVar(value=self.cfg.get("wasd_shift", True))
+        body = theme.card(left, "Ходьба на WASD", toggle_var=self.set_wasd_on,
+                          toggle_command=lambda: self.set_wasd(self.set_wasd_on.get()))
+        theme.card_row(body, 0, "Стрелки тоже двигают персонажа",
+                       theme.Toggle(body, self.set_wasd_arrows, self._wasd_options_changed), muted=True)
+        theme.card_row(body, 1, "Shift — идти шагом",
+                       theme.Toggle(body, self.set_wasd_shift, self._wasd_options_changed), muted=True)
         self.wasd_status = tk.StringVar(value="Выключено")
-        ttk.Label(wasd, textvariable=self.wasd_status, style="Muted.TLabel", wraplength=900,
-                  justify="left").pack(anchor="w", pady=(4, 0))
-
-        buttons = ttk.Frame(tab)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(16, 0))
-        ttk.Button(buttons, text="Сохранить настройки", style="Accent.TButton", command=self.save_settings).pack(side="left")
-        ttk.Button(buttons, text="Восстановить из бэкапа…", command=self.restore_backup).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Экспорт JSON…", command=self.export_json).pack(side="left")
-        ttk.Button(buttons, text="Импорт JSON…", command=self.import_json).pack(side="left", padx=6)
-        ttk.Label(tab, text=f"Бэкапы: {game.BACKUP_DIR}", style="Muted.TLabel").grid(row=6, column=0, columnspan=2, sticky="w", pady=12)
-        ttk.Label(tab, style="Muted.TLabel", justify="left", text=(
-            "Как применить изменения в игре:\n"
-            "  1. Выйдите из миссии в главное меню (игра сохранит персонажа).\n"
-            "  2. Нажмите горячую клавишу, отредактируйте и нажмите «Применить в игре».\n"
-            "  3. Выберите персонажа заново — игра загрузит изменённое сохранение.\n"
-            "Для работы поверх игры включите в настройках игры режим «В окне» или «Полноэкранный в окне»."
-        )).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Label(body, textvariable=self.wasd_status, style="CardMuted.TLabel", wraplength=470,
+                  justify="left").grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        info = theme.card(left, "Как это работает")
+        ttk.Label(info, style="CardMuted.TLabel", justify="left", wraplength=470, text=(
+            "Игра на ПК ходит только мышью или геймпадом, поэтому мод создаёт виртуальный геймпад Xbox, "
+            "и W/A/S/D двигают его левый стик. Клавиши работают, только когда активно окно игры.\n\n"
+            "Мод работает в любом мире, в том числе когда вы заходите к другу: управление обрабатывается "
+            "на вашем ПК. Чтобы друг тоже ходил на WASD, ему нужно включить мод в загрузчике у себя.\n\n"
+            "Нужен драйвер ViGEmBus — ставится вместе с пакетом vgamepad.")).pack(anchor="w")
 
     # ---------------------------------------------------------- save files
     def refresh_save_list(self, select=None):
@@ -599,7 +656,7 @@ class LoaderApp:
         self.gild_lvl.set(str((gilded or {}).get("level", 1)))
         self.armor_props = [dict(p) for p in item.get("armorproperties") or []]
         self._refresh_props()
-        self.editor.configure(text="Предмет")
+        self.editor.configure(text="⚔  Предмет")
         self._update_item_header()
 
     def _refresh_props(self):
@@ -778,6 +835,7 @@ class LoaderApp:
         self.status_var.set("JSON принят — нажмите «Применить в игре», чтобы записать сохранение")
 
     def _on_tab_changed(self, _event=None):
+        self._highlight_nav()
         if not self.save:
             return
         self.commit_forms()
@@ -793,6 +851,7 @@ class LoaderApp:
             self.set_game.set(path)
 
     def _preview_alpha(self, _value=None):
+        self.alpha_label.configure(text=f"{float(self.set_alpha.get()):.2f}")
         try:
             self.root.attributes("-alpha", float(self.set_alpha.get()))
         except tk.TclError:
@@ -805,7 +864,7 @@ class LoaderApp:
                         launch_game=self.set_launch.get(), backup_on_apply=self.set_backup.get(),
                         overlay_alpha=round(float(self.set_alpha.get()), 2), paks_dir=self.set_paks.get().strip(),
                         pak_key=self.set_pak_key.get().strip(), language=self.set_lang.get() or "ru-RU",
-                        wasd_arrows=self.set_wasd_arrows.get())
+                        wasd_arrows=self.set_wasd_arrows.get(), wasd_shift=self.set_wasd_shift.get())
         game.save_config(self.cfg)
         if catalog_changed:
             self.load_catalog(force=True)
@@ -1073,7 +1132,9 @@ class LoaderApp:
 
     def _wasd_options_changed(self):
         self.wasd.arrows = self.set_wasd_arrows.get()
+        self.wasd.shift_walk = self.set_wasd_shift.get()
         self.cfg["wasd_arrows"] = self.wasd.arrows
+        self.cfg["wasd_shift"] = self.wasd.shift_walk
         game.save_config(self.cfg)
 
 
