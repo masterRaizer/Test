@@ -11,6 +11,7 @@ STEAM_URI = "steam://rungameid/1672970"
 APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/.config"), "MCDLoader")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 BACKUP_DIR = os.path.join(APP_DIR, "backups")
+CACHE_DIR = os.path.join(APP_DIR, "cache")
 
 DEFAULT_CONFIG = {
     "hotkey": "F8",
@@ -20,6 +21,11 @@ DEFAULT_CONFIG = {
     "overlay_alpha": 0.95,
     "extra_save_dirs": [],
     "last_save": "",
+    "paks_dir": "",
+    "pak_key": "",
+    "language": "ru-RU",
+    "wasd_enabled": False,
+    "wasd_arrows": True,
 }
 
 # Virtual-key codes for the hotkeys offered in settings.

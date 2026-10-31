@@ -188,16 +188,16 @@ class SaveFile:
         indexes = [i.get("inventoryIndex") for i in collection if i.get("inventoryIndex") is not None]
         return (max(indexes) + 1) if indexes else 0
 
-    def new_item(self, item_type, slot=None, in_chest=False):
+    def new_item(self, item_type, slot=None, in_chest=False, artifact=False, rarity="Common", level=1):
         item = {
             "enchantments": [{"id": gd.UNSET_ENCHANTMENT, "level": 0} for _ in range(gd.ENCHANTMENTS_PER_ITEM)],
             "markedNew": True,
-            "power": gd.power_from_level(1),
-            "rarity": "Common",
+            "power": gd.power_from_level(level),
+            "rarity": rarity,
             "type": item_type,
             "upgraded": False,
         }
-        if slot and slot.startswith("Hotbar"):
+        if artifact or (slot and slot.startswith("Hotbar")):
             item.pop("enchantments")
         self.add_item(item, slot=slot, in_chest=in_chest)
         return item

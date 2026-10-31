@@ -125,5 +125,17 @@ class SaveFileTests(unittest.TestCase):
         self.assertTrue(self.save.changed_on_disk())
 
 
+class WasdTests(unittest.TestCase):
+    def test_stick_directions(self):
+        from mcd_loader.wasd import stick_from_keys
+        self.assertEqual(stick_from_keys(False, False, False, False), (0.0, 0.0))
+        self.assertEqual(stick_from_keys(True, False, False, False), (0.0, 1.0))
+        self.assertEqual(stick_from_keys(False, True, False, False), (-1.0, 0.0))
+        self.assertEqual(stick_from_keys(True, True, True, True), (0.0, 0.0))
+        x, y = stick_from_keys(True, False, False, True)
+        self.assertAlmostEqual(x * x + y * y, 1.0)
+        self.assertEqual(stick_from_keys(False, False, True, False, slow=True), (0.0, -0.5))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,17 +1,23 @@
 """In-game overlay: a topmost editor window toggled by a hotkey over the running game."""
 import json
 import os
+import queue
 import shutil
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import game, gamedata as gd
-from .savefile import (SaveFile, describe_item, find_saves, item_level, max_out_enchantments,
+from . import catalog as cat_mod, game, gamedata as gd
+from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
+from .wasd import WasdMovement, WasdUnavailable
+from .savefile import (SaveFile, find_saves, item_level, max_out_enchantments,
                        read_profile, recompute_invested_points, set_enchantment, set_item_level)
 
 BG, PANEL, FG, MUTED, ACCENT, WARN = "#1e1f24", "#2a2c33", "#e8e8e8", "#9aa0a6", "#3fa66b", "#d9a441"
 NO_SLOT = "(не надет)"
 LOCATIONS = {"inventory": "Инвентарь", "chest": "Сундук"}
+SLOT_NAMES = {"MeleeGear": "Ближнее", "RangedGear": "Дальнее", "ArmorGear": "Броня",
+              "HotbarSlot1": "Артефакт 1", "HotbarSlot2": "Артефакт 2", "HotbarSlot3": "Артефакт 3"}
 FILTERS = ["Все", "Надетые", "Инвентарь", "Сундук"]
 
 
@@ -40,7 +46,8 @@ def apply_dark_theme(root):
     style.configure("Muted.TLabel", foreground=MUTED)
     style.configure("Warn.TLabel", foreground=WARN)
     style.configure("Big.TLabel", font=("Segoe UI", 13, "bold"))
-    style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=24)
+    style.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=FG, rowheight=30)
+    style.configure("Ench.TButton", anchor="w", padding=(4, 1))
     style.configure("Treeview.Heading", background="#33363e", foreground=FG)
     style.map("Treeview", background=[("selected", "#3d5a80")])
     style.map("TCombobox", fieldbackground=[("readonly", PANEL)], foreground=[("readonly", FG)])
@@ -59,6 +66,11 @@ class LoaderApp:
         self.armor_props = []
         self.hotkey = game.HotkeyPoller(cfg.get("hotkey", "F8"))
         self._suspend_traces = False
+        self.catalog = None
+        self.icons = IconCache(root)
+        self.wasd = WasdMovement(arrows=cfg.get("wasd_arrows", True))
+        self._icon_thread_stop = threading.Event()
+        self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
 
         root.title("MCD Loader — Minecraft Dungeons")
         root.geometry("1280x760")
@@ -85,6 +97,10 @@ class LoaderApp:
         self.refresh_save_list(select=initial_save or cfg.get("last_save"))
         self.root.after(50, self._poll_hotkey)
         self.root.after(2000, self._watch_disk)
+        self.root.after(100, self._drain_ui_queue)
+        self.load_catalog()
+        if cfg.get("wasd_enabled"):
+            self.root.after(500, lambda: self.set_wasd(True))
 
     # ------------------------------------------------------------------ UI
     def _build_topbar(self):
@@ -160,7 +176,7 @@ class LoaderApp:
         left.pack(side="left", fill="both", expand=True, padx=(0, 8))
         actions = ttk.Frame(left)
         actions.pack(side="bottom", fill="x", pady=(6, 0))
-        for i, (text, cmd) in enumerate((("＋ Новый", self.add_item), ("⧉ Дублировать", self.duplicate_item),
+        for i, (text, cmd) in enumerate((("＋ Добавить предмет…", self.add_item), ("⧉ Дублировать", self.duplicate_item),
                                          ("✕ Удалить", self.delete_item), ("⇄ Сундук/инвентарь", self.move_item),
                                          ("Все: уровень…", self.set_all_levels),
                                          ("Все: зачар. ур. 3", self.max_all_enchantments))):
@@ -175,12 +191,13 @@ class LoaderApp:
         flt.pack(side="left", padx=6)
         flt.bind("<<ComboboxSelected>>", lambda e: self.refresh_items())
 
-        cols = ("loc", "slot", "type", "lvl", "rarity", "ench")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for col, title, width in zip(cols, ("Где", "Слот/индекс", "Тип", "Ур.", "Редкость", "Зачарования"),
-                                     (85, 95, 150, 40, 70, 200)):
+        cols = ("slot", "lvl", "ench")
+        self.tree = ttk.Treeview(left, columns=cols, show="tree headings", selectmode="browse")
+        self.tree.heading("#0", text="Предмет")
+        self.tree.column("#0", width=200)
+        for col, title, width in zip(cols, ("Где", "Ур.", "Зачарования"), (95, 40, 160)):
             self.tree.heading(col, text=title)
-            self.tree.column(col, width=width, stretch=col in ("type", "ench"))
+            self.tree.column(col, width=width, stretch=col == "ench")
         scroll = ttk.Scrollbar(left, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -203,9 +220,20 @@ class LoaderApp:
         self.it_gifted = tk.BooleanVar()
         self.it_new = tk.BooleanVar()
 
+        head = ttk.Frame(col_a)
+        head.pack(fill="x", pady=(0, 6))
+        self.item_icon = ttk.Label(head, image=self.icons.placeholder(64))
+        self.item_icon.pack(side="left")
+        self.item_title = ttk.Label(head, text="—", style="Big.TLabel", wraplength=230)
+        self.item_title.pack(side="left", padx=8)
         grid = ttk.Frame(col_a)
         grid.pack(fill="x")
-        self.type_box = self._labeled(grid, 0, "Тип (ID)", ttk.Combobox(grid, textvariable=self.it_type, width=22))
+        type_row = ttk.Frame(grid)
+        self.type_box = ttk.Combobox(type_row, textvariable=self.it_type, width=17)
+        self.type_box.pack(side="left")
+        ttk.Button(type_row, text="…", width=2, command=self._pick_type).pack(side="left", padx=(2, 0))
+        self._labeled(grid, 0, "Тип (ID)", type_row)
+        self.it_type.trace_add("write", lambda *_: self._update_item_header())
         self._labeled(grid, 1, "Уровень силы", ttk.Spinbox(grid, from_=0, to=10000, textvariable=self.it_level, width=10))
         self._labeled(grid, 2, "Редкость", ttk.Combobox(grid, textvariable=self.it_rarity, values=gd.RARITIES, state="readonly", width=12))
         self._labeled(grid, 3, "Слот", ttk.Combobox(grid, textvariable=self.it_slot, values=[NO_SLOT] + gd.EQUIPMENT_SLOTS,
@@ -223,12 +251,16 @@ class LoaderApp:
             frame = ttk.LabelFrame(ench, text=f"Зачарования, слот {s + 1}", padding=4)
             frame.grid(row=s, column=0, sticky="we", pady=2)
             for k in range(3):
-                id_var, lvl_var = tk.StringVar(), tk.StringVar(value="0")
-                box = ttk.Combobox(frame, textvariable=id_var, width=20)
-                box.grid(row=k, column=0, padx=2, pady=1)
+                index = s * 3 + k
+                id_var, lvl_var = tk.StringVar(value=gd.UNSET_ENCHANTMENT), tk.StringVar(value="0")
+                button = ttk.Button(frame, style="Ench.TButton", compound="left", width=22,
+                                    command=lambda i=index: self._pick_enchantment(i))
+                button.grid(row=k, column=0, padx=2, pady=1, sticky="we")
                 ttk.Spinbox(frame, from_=0, to=3, textvariable=lvl_var, width=4).grid(row=k, column=1, padx=2)
+                id_var.trace_add("write", lambda *_, b=button, v=id_var: self._update_ench_button(b, v))
+                self._update_ench_button(button, id_var)
                 self.ench_vars.append((id_var, lvl_var))
-                self.ench_boxes.append(box)
+                self.ench_boxes.append(button)
 
         gild = ttk.LabelFrame(col_a, text="Позолоченное (незерит)", padding=4)
         gild.pack(fill="x", pady=4)
@@ -236,8 +268,11 @@ class LoaderApp:
         self.gild_id = tk.StringVar()
         self.gild_lvl = tk.StringVar(value="1")
         ttk.Checkbutton(gild, variable=self.gild_on).pack(side="left")
-        self.gild_box = ttk.Combobox(gild, textvariable=self.gild_id, width=18)
+        self.gild_box = ttk.Button(gild, style="Ench.TButton", compound="left", width=17,
+                                   command=lambda: self._pick_enchantment(None))
         self.gild_box.pack(side="left", padx=2)
+        self.gild_id.trace_add("write", lambda *_: self._update_ench_button(self.gild_box, self.gild_id))
+        self._update_ench_button(self.gild_box, self.gild_id)
         ttk.Spinbox(gild, from_=0, to=3, textvariable=self.gild_lvl, width=4).pack(side="left")
 
         props = ttk.LabelFrame(col_a, text="Свойства брони", padding=4)
@@ -288,6 +323,32 @@ class LoaderApp:
         self._labeled(tab, 3, "", ttk.Checkbutton(tab, text="Резервная копия перед каждым применением", variable=self.set_backup))
         self._labeled(tab, 4, "Прозрачность окна", ttk.Scale(tab, from_=0.5, to=1.0, variable=self.set_alpha,
                                                               command=self._preview_alpha))
+        self.set_paks = tk.StringVar(value=self.cfg.get("paks_dir", ""))
+        self.set_pak_key = tk.StringVar(value=self.cfg.get("pak_key", ""))
+        self.set_lang = tk.StringVar(value=self.cfg.get("language", "ru-RU"))
+        paks_row = ttk.Frame(tab)
+        ttk.Entry(paks_row, textvariable=self.set_paks, width=60).pack(side="left")
+        ttk.Button(paks_row, text="…", width=3, command=self._browse_paks).pack(side="left", padx=4)
+        ttk.Button(paks_row, text="Перечитать файлы игры", command=lambda: self.load_catalog(force=True)).pack(side="left")
+        self._labeled(tab, 8, "Папка Paks игры", paks_row)
+        self._labeled(tab, 9, "AES-ключ pak (если нужен)", ttk.Entry(tab, textvariable=self.set_pak_key, width=70))
+        self._labeled(tab, 10, "Язык названий", ttk.Combobox(tab, textvariable=self.set_lang, width=12,
+                                                              values=["ru-RU", "en", "de-DE", "fr-FR", "es-ES", "uk-UA"]))
+        self.catalog_status = tk.StringVar(value="Файлы игры: загрузка…")
+        ttk.Label(tab, textvariable=self.catalog_status, style="Muted.TLabel").grid(row=11, column=1, sticky="w")
+
+        wasd = ttk.LabelFrame(tab, text="Управление WASD (мод)", padding=8)
+        wasd.grid(row=12, column=0, columnspan=2, sticky="we", pady=(12, 0))
+        self.set_wasd_on = tk.BooleanVar(value=False)
+        self.set_wasd_arrows = tk.BooleanVar(value=self.cfg.get("wasd_arrows", True))
+        ttk.Checkbutton(wasd, text="Ходить на W/A/S/D (Shift — шагом)", variable=self.set_wasd_on,
+                        command=lambda: self.set_wasd(self.set_wasd_on.get())).pack(anchor="w")
+        ttk.Checkbutton(wasd, text="Стрелки тоже двигают персонажа", variable=self.set_wasd_arrows,
+                        command=self._wasd_options_changed).pack(anchor="w")
+        self.wasd_status = tk.StringVar(value="Выключено")
+        ttk.Label(wasd, textvariable=self.wasd_status, style="Muted.TLabel", wraplength=900,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+
         buttons = ttk.Frame(tab)
         buttons.grid(row=5, column=0, columnspan=2, sticky="w", pady=(16, 0))
         ttk.Button(buttons, text="Сохранить настройки", style="Accent.TButton", command=self.save_settings).pack(side="left")
@@ -393,13 +454,7 @@ class LoaderApp:
         self.refresh_character()
         self.refresh_items()
         self.refresh_json()
-        types = sorted(self.save.known_item_types(), key=str.lower)
-        self.type_box["values"] = types
-        enchants = [gd.UNSET_ENCHANTMENT] + sorted(self.save.known_enchantments(), key=str.lower)
-        for box in self.ench_boxes:
-            box["values"] = enchants
-        self.gild_box["values"] = enchants[1:]
-        self.prop_box["values"] = sorted(self.save.known_armor_properties(), key=str.lower)
+        self._refresh_value_lists()
 
     def refresh_character(self):
         s = self.save
@@ -440,12 +495,20 @@ class LoaderApp:
             if (flt == "Надетые" and not equipped) or (flt == "Инвентарь" and (loc != "inventory" or equipped)) \
                     or (flt == "Сундук" and loc != "chest"):
                 continue
-            slot = item.get("equipmentSlot") or f"#{item.get('inventoryIndex', '')}"
-            iid = self.tree.insert("", "end", values=(LOCATIONS[loc], slot, item.get("type", "?"), item_level(item),
-                                                      item.get("rarity", ""), describe_item(item)))
+            if item.get("equipmentSlot"):
+                slot = "★ " + SLOT_NAMES.get(item["equipmentSlot"], item["equipmentSlot"])
+            else:
+                slot = f"{LOCATIONS[loc]} #{item.get('inventoryIndex', '')}"
+            item_type = item.get("type", "?")
+            iid = self.tree.insert("", "end", text=" " + self._item_name(item_type),
+                                   image=self.icons.get("item", item_type, 26),
+                                   values=(slot, item_level(item), self._describe_enchants(item)),
+                                   tags=(item.get("rarity", "Common"),))
             self.items_by_iid[iid] = item
             if item is self.current_item:
                 selected_iid = iid
+        for rarity, color in RARITY_COLORS.items():
+            self.tree.tag_configure(rarity, foreground=color)
         if selected_iid:
             self.tree.selection_set(selected_iid)
             self.tree.see(selected_iid)
@@ -536,12 +599,14 @@ class LoaderApp:
         self.gild_lvl.set(str((gilded or {}).get("level", 1)))
         self.armor_props = [dict(p) for p in item.get("armorproperties") or []]
         self._refresh_props()
-        self.editor.configure(text=f"Предмет: {item.get('type', '—')}")
+        self.editor.configure(text="Предмет")
+        self._update_item_header()
 
     def _refresh_props(self):
         self.props_list.delete(0, "end")
         for p in self.armor_props:
-            self.props_list.insert("end", f"{p.get('id')}  ({p.get('rarity', 'Common')})")
+            name = self.catalog.armor_property_name(p.get("id")) if self.catalog else p.get("id")
+            self.props_list.insert("end", f"{name}  [{p.get('id')}]  ({p.get('rarity', 'Common')})")
 
     def _add_prop(self):
         if self.current_item is None or not self.prop_id.get().strip():
@@ -627,8 +692,22 @@ class LoaderApp:
         if not self.save:
             return
         self.commit_item(refresh=False)
-        self._select(self.save.new_item(gd.DEFAULT_ITEM_FOR_SLOT["MeleeGear"]))
-        self.type_box.focus_set()
+        if not (self.catalog and self.catalog.loaded):
+            self.status_var.set("Файлы игры не загружены — в списке только предметы из сохранения. "
+                                "Укажите папку Paks в «Настройках», чтобы видеть все предметы с иконками.")
+        ItemPicker(self.root, self.icons, self.catalog, sorted(self.save.known_item_types()), self._add_from_picker)
+
+    def _add_from_picker(self, ident, category=None, in_chest=False, level=1, count=1, equip=False, rarity="Common"):
+        slot = cat_mod.CATEGORY_SLOT.get(category) if equip and not in_chest else None
+        if slot == "HotbarSlot1":
+            used = {i.get("equipmentSlot") for i in self.save.inventory}
+            slot = next((s for s in gd.EQUIPMENT_SLOTS[3:] if s not in used), "HotbarSlot1")
+        item = None
+        for n in range(count):
+            item = self.save.new_item(ident, slot=slot if n == 0 else None, in_chest=in_chest,
+                                      artifact=category == "artifact", rarity=rarity, level=level)
+        self._select(item)
+        self.status_var.set(f"Добавлено: {self._item_name(ident)} × {count}. Нажмите «Применить в игре».")
 
     def duplicate_item(self):
         if self.save and self.current_item is not None:
@@ -720,10 +799,16 @@ class LoaderApp:
             pass
 
     def save_settings(self):
+        catalog_changed = (self.set_paks.get().strip(), self.set_pak_key.get().strip(), self.set_lang.get()) != \
+            (self.cfg.get("paks_dir", ""), self.cfg.get("pak_key", ""), self.cfg.get("language", "ru-RU"))
         self.cfg.update(hotkey=self.set_hotkey.get(), game_path=self.set_game.get().strip(),
                         launch_game=self.set_launch.get(), backup_on_apply=self.set_backup.get(),
-                        overlay_alpha=round(float(self.set_alpha.get()), 2))
+                        overlay_alpha=round(float(self.set_alpha.get()), 2), paks_dir=self.set_paks.get().strip(),
+                        pak_key=self.set_pak_key.get().strip(), language=self.set_lang.get() or "ru-RU",
+                        wasd_arrows=self.set_wasd_arrows.get())
         game.save_config(self.cfg)
+        if catalog_changed:
+            self.load_catalog(force=True)
         self.hotkey = game.HotkeyPoller(self.cfg["hotkey"])
         self.status_var.set(f"Настройки сохранены ({game.CONFIG_PATH})")
 
@@ -827,7 +912,169 @@ class LoaderApp:
         if self.save and self.save.dirty and not messagebox.askyesno(
                 "Выход", "Есть непримененные изменения. Выйти без применения?", parent=self.root):
             return
+        self._icon_thread_stop.set()
+        self.wasd.stop()
         self.root.destroy()
+
+    # ------------------------------------------------- game catalog/icons
+    def load_catalog(self, force=False):
+        """Read the game's paks in the background: full item list, names and icons."""
+        paks_dir = cat_mod.find_paks_dir(self.cfg.get("paks_dir", ""), self.cfg.get("game_path", ""))
+        if not paks_dir:
+            self.catalog_status.set("Файлы игры не найдены — укажите папку …\\Dungeons\\Content\\Paks")
+            return
+        self._icon_thread_stop.set()
+        self._icon_thread_stop = threading.Event()
+        stop = self._icon_thread_stop
+        cache_dir = os.path.join(game.CACHE_DIR, "catalog")
+        if force:
+            try:
+                os.remove(os.path.join(cache_dir, "catalog.json"))
+            except OSError:
+                pass
+        self.catalog_status.set(f"Файлы игры: чтение {paks_dir}…")
+
+        def work():
+            try:
+                catalog = cat_mod.GameCatalog.load(paks_dir, cache_dir, [self.cfg.get("pak_key", "")],
+                                                   self.cfg.get("language", "ru-RU"))
+            except Exception as e:
+                message = f"Не удалось прочитать файлы игры: {e}"
+                self._ui_queue.put(lambda: self.catalog_status.set(message))
+                return
+            self._ui_queue.put(lambda: self._on_catalog(catalog))
+            catalog.extract_all_icons(stop=stop.is_set)
+            if not stop.is_set():
+                self._ui_queue.put(self._on_icons_ready)
+
+        threading.Thread(target=work, daemon=True, name="catalog").start()
+
+    def _drain_ui_queue(self):
+        try:
+            while True:
+                self._ui_queue.get_nowait()()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self._drain_ui_queue)
+
+    def _on_catalog(self, catalog):
+        self.catalog = catalog
+        self.icons.set_catalog(catalog)
+        self.catalog_status.set(
+            f"Файлы игры: версия {catalog.version or '?'}, предметов {len(catalog.items)}, "
+            f"зачарований {len(catalog.enchantments)}, свойств брони {len(catalog.armor_properties)}, "
+            f"язык {catalog.language or '—'}. Иконки извлекаются…")
+        self._refresh_after_catalog()
+
+    def _on_icons_ready(self):
+        self.icons.set_catalog(self.catalog)
+        self.catalog_status.set(self.catalog_status.get().replace("Иконки извлекаются…", "Иконки готовы."))
+        self._refresh_after_catalog()
+
+    def _refresh_after_catalog(self):
+        if self.save:
+            self._refresh_value_lists()
+            self.refresh_items()
+            self._update_item_header()
+            for button, (id_var, _) in zip(self.ench_boxes, self.ench_vars):
+                self._update_ench_button(button, id_var)
+            self._update_ench_button(self.gild_box, self.gild_id)
+            self._refresh_props()
+
+    def _refresh_value_lists(self):
+        types = set(self.save.known_item_types())
+        props = set(self.save.known_armor_properties())
+        if self.catalog:
+            types.update(self.catalog.items)
+            props.update(self.catalog.armor_properties)
+        self.type_box["values"] = sorted(types, key=str.lower)
+        self.prop_box["values"] = sorted(props, key=str.lower)
+
+    def _item_name(self, item_type):
+        return self.catalog.item_name(item_type) if self.catalog else item_type
+
+    def _ench_name(self, ench_id):
+        if not ench_id or ench_id == gd.UNSET_ENCHANTMENT:
+            return "— пусто —"
+        return self.catalog.enchantment_name(ench_id) if self.catalog else ench_id
+
+    def _describe_enchants(self, item):
+        parts = [f"{self._ench_name(e['id'])} {e['level']}" for e in item.get("enchantments") or []
+                 if e.get("level") and e.get("id") != gd.UNSET_ENCHANTMENT]
+        gilded = item.get("netheriteEnchant")
+        if gilded:
+            parts.append(f"★{self._ench_name(gilded.get('id'))} {gilded.get('level', 0)}")
+        return ", ".join(parts)
+
+    def _update_item_header(self):
+        item_type = self.it_type.get().strip()
+        self.item_icon.configure(image=self.icons.get("item", item_type, 64) if item_type else self.icons.placeholder(64))
+        self.item_title.configure(text=self._item_name(item_type) if item_type else "—")
+
+    def _update_ench_button(self, button, var):
+        ench_id = var.get().strip() or gd.UNSET_ENCHANTMENT
+        image = self.icons.get("enchantment", ench_id, 22) if ench_id != gd.UNSET_ENCHANTMENT \
+            else self.icons.placeholder(22)
+        button.configure(text=" " + self._ench_name(ench_id), image=image)
+        button.image = image
+
+    def _pick_type(self):
+        if not self.save or self.current_item is None:
+            return
+        ItemTypePicker(self.root, self.icons, self.catalog, sorted(self.save.known_item_types()),
+                       lambda ident: self.it_type.set(ident))
+
+    def _pick_enchantment(self, index):
+        if not self.save or self.current_item is None:
+            return
+        slot = self.it_slot.get()
+        category = self.catalog.category(self.it_type.get().strip()) if self.catalog else None
+        if slot not in gd.GEAR_SLOTS and category in ("melee", "ranged", "armor"):
+            slot = cat_mod.CATEGORY_SLOT[category]
+        target = self.gild_id if index is None else self.ench_vars[index][0]
+
+        def chosen(ident):
+            target.set(ident)
+            if index is None:
+                self.gild_on.set(ident != gd.UNSET_ENCHANTMENT)
+            elif ident != gd.UNSET_ENCHANTMENT and _int(self.ench_vars[index][1], 0) == 0:
+                self.ench_vars[index][1].set("3")
+                base = index - index % 3
+                for j in range(base, base + 3):
+                    if j != index:
+                        self.ench_vars[j][1].set("0")
+        EnchantmentPicker(self.root, self.icons, self.catalog, self.save.known_enchantments(), slot, chosen,
+                          allow_unset=index is not None)
+
+    def _browse_paks(self):
+        path = filedialog.askdirectory(title="Папка Dungeons\\Content\\Paks")
+        if path:
+            self.set_paks.set(os.path.normpath(path))
+
+    # ------------------------------------------------------------- WASD
+    def set_wasd(self, enabled):
+        if enabled:
+            try:
+                self.wasd.arrows = self.set_wasd_arrows.get()
+                self.wasd.start()
+            except WasdUnavailable as e:
+                self.set_wasd_on.set(False)
+                self.wasd_status.set(f"Не включено: {e}")
+                return
+            self.wasd_status.set("Включено. В окне игры W/A/S/D двигают персонажа (через виртуальный геймпад). "
+                                 "Мышь по-прежнему атакует и целится.")
+        else:
+            self.wasd.stop()
+            self.wasd_status.set("Выключено")
+        self.set_wasd_on.set(enabled)
+        self.cfg["wasd_enabled"] = enabled
+        game.save_config(self.cfg)
+
+    def _wasd_options_changed(self):
+        self.wasd.arrows = self.set_wasd_arrows.get()
+        self.cfg["wasd_arrows"] = self.wasd.arrows
+        game.save_config(self.cfg)
 
 
 def run(initial_save=None, launch=None):
