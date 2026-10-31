@@ -34,6 +34,29 @@ class WasdUnavailable(Exception):
         self.installer = installer  # ViGEmBus .msi that can fix the problem, if found
 
 
+def driver_installed():
+    """True when the ViGEmBus driver is registered as installed (Windows)."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    roots = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")]
+    for hive, path in roots:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                for i in range(winreg.QueryInfoKey(key)[0]):
+                    try:
+                        with winreg.OpenKey(key, winreg.EnumKey(key, i)) as sub:
+                            name = str(winreg.QueryValueEx(sub, "DisplayName")[0]).lower()
+                    except OSError:
+                        continue
+                    if "vigem" in name or "virtual gamepad emulation" in name:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def driver_installer():
     """Path of the ViGEmBus installer shipped inside the vgamepad package (None if absent)."""
     import importlib.util

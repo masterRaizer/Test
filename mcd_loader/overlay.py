@@ -5,11 +5,13 @@ import os
 import queue
 import shutil
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import catalog as cat_mod, chrome, game, gamedata as gd, theme
+from . import catalog as cat_mod, chrome, game, gamedata as gd, shell, theme
 from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
+from . import wasd as wasd_mod
 from .wasd import WasdMovement, WasdUnavailable
 from .savefile import (SaveFile, find_saves, item_level, max_out_enchantments,
                        read_profile, recompute_invested_points, set_enchantment, set_item_level)
@@ -30,68 +32,88 @@ def _int(var, default=0):
 
 
 class LoaderApp:
-    PAGES = [("◉", "Персонаж"), ("▦", "Инвентарь"), ("{ }", "JSON"), ("⚙", "Настройки"), ("✦", "Моды")]
-    NAV_ORDER = [0, 1, 4, 2, 3]  # sidebar order: character, inventory, mods, JSON, settings
+    PAGES = [("◉", "Персонаж"), ("▦", "Инвентарь"), ("{ }", "JSON"), ("☰", "Настройки"), ("✦", "Моды"),
+             ("⌂", "Главная"), ("⚙", "Система")]
+    HOME, SYSTEM = 5, 6
+    NAV_MAIN = [5, 0, 1, 4, 6]
+    NAV_QUICK = [2, 3]
 
-    def __init__(self, root, cfg, initial_save=None, splash=None):
-        step = splash.step if splash else (lambda *a: None)
+    def __init__(self, root, cfg, initial_save=None, loading=None, border=None, host=None, on_back=None):
+        step = loading.set_status if loading else (lambda *a: None)
         self.root = root
         self.cfg = cfg
+        self.border = border
+        self.on_back = on_back
+        self.frame = tk.Frame(host or root, bg=theme.WINDOW)
+        self.frame.pack(fill="both", expand=True)
+        self.loading = loading
         self.save = None
         self.saves = []
+        self.save_infos = []
         self.items_by_iid = {}
         self.current_item = None
         self.armor_props = []
         self.hotkey = game.HotkeyPoller(cfg.get("hotkey", "F8"))
         self._suspend_traces = False
         self.catalog = None
+        self.paks_dir = None
+        self.catalog_error = None
         self.icons = IconCache(root)
         self.wasd = WasdMovement(arrows=cfg.get("wasd_arrows", True), shift_walk=cfg.get("wasd_shift", True))
         self._icon_thread_stop = threading.Event()
         self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
 
         root.title("MCD Loader — Minecraft Dungeons")
-        root.geometry("1320x800")
-        root.minsize(1180, 680)
         root.attributes("-topmost", True)
         self.alpha = float(cfg.get("overlay_alpha", 0.95))
         self.animator = chrome.Animator(root)
         chrome.set_window_icon(root)
         theme.apply_theme(root)
-        step("Подготовка интерфейса", 0.15)
+        step("Подготовка интерфейса")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-s>", lambda e: self.apply_to_game())
         root.bind("<Escape>", lambda e: self.hide() if self.hotkey.available else None)
 
-        self._build_header()
-        body = ttk.Frame(root, style="Window.TFrame")
-        body.pack(fill="both", expand=True)
-        self._build_sidebar(body)
-        content = ttk.Frame(body, padding=(14, 10, 14, 12))
-        content.pack(side="left", fill="both", expand=True)
+        self._build_sidebar(self.frame)
+        right = tk.Frame(self.frame, bg=theme.WINDOW)
+        right.pack(side="left", fill="both", expand=True)
+        self._build_header(right)
+        panel = theme.RoundedBox(right, bg=theme.PAGE, outline=theme.BORDER, radius=14, pad=6, fill_height=True,
+                                 frame_style="Page.TFrame", parent_bg=theme.WINDOW)
+        panel.pack(fill="both", expand=True, padx=(0, 8), pady=(0, 8))
+        content = ttk.Frame(panel.inner, style="Page.TFrame", padding=(16, 4, 16, 6))
+        content.pack(fill="both", expand=True)
+        self.top_progress = shell.TopProgress(content)
+        self.top_progress.pack(fill="x", pady=(0, 6))
         self.status_var = tk.StringVar(value="Выберите персонажа")
         self.status = ttk.Label(content, textvariable=self.status_var, style="Muted.TLabel")
         self.status.pack(fill="x", pady=(0, 8))
-        self.banner = tk.Frame(content, bg="#2b2617", highlightbackground=theme.WARN, highlightthickness=1)
+        self.banner = tk.Frame(content, bg="#211b0e", highlightbackground="#5a4312", highlightthickness=1)
         self.banner_text = tk.StringVar()
-        tk.Label(self.banner, textvariable=self.banner_text, bg="#2b2617", fg=theme.WARN, font=theme.FONT,
-                 justify="left", anchor="w", wraplength=760).pack(side="left", fill="x", expand=True, padx=12, pady=8)
-        ttk.Button(self.banner, text="Указать папку игры…", style="Accent.TButton",
-                   command=self.choose_game_folder).pack(side="right", padx=10, pady=6)
+        tk.Label(self.banner, textvariable=self.banner_text, bg="#211b0e", fg=theme.WARN, font=theme.FONT,
+                 justify="left", anchor="w", wraplength=700).pack(side="left", fill="x", expand=True, padx=12, pady=8)
+        shell.CanvasButton(self.banner, "Указать папку игры…", self.choose_game_folder,
+                           bg="#211b0e").pack(side="right", padx=10, pady=6)
         self.notebook = ttk.Notebook(content, style="Hidden.TNotebook")
         self.notebook.pack(fill="both", expand=True)
+        self.page_cover = tk.Frame(content, bg=theme.PAGE)
+        grip = self.border.resize_grip(panel.inner) if self.border else None
+        if grip:
+            grip.place(relx=1.0, rely=1.0, anchor="se")
         self._build_character_tab()
-        step("Инвентарь и зачарования", 0.35)
+        step("Инвентарь и зачарования")
         self._build_inventory_tab()
         self._build_json_tab()
         self._build_settings_tab()
         self._build_mods_tab()
+        self._build_home_tab()
+        self._build_system_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-        chrome.style_titlebar(root)
 
-        step("Поиск сохранений", 0.55)
+        step("Поиск сохранений")
         self.refresh_save_list(select=initial_save or cfg.get("last_save"))
-        step("Файлы игры", 0.8)
+        step("Файлы игры")
+        self.notebook.select(self.HOME)
         self.root.after(50, self._poll_hotkey)
         self.root.after(2000, self._watch_disk)
         self.root.after(100, self._drain_ui_queue)
@@ -99,49 +121,96 @@ class LoaderApp:
         if cfg.get("wasd_enabled"):
             self.root.after(500, lambda: self.set_wasd(True))
         self.root.after(80, self._highlight_nav)
+        self.root.after(300, self.run_checks)
 
     # ------------------------------------------------------------------ UI
-    def _build_header(self):
-        bar = ttk.Frame(self.root, style="Window.TFrame", padding=(22, 12, 14, 12))
+    def _build_header(self, parent):
+        bar = tk.Frame(parent, bg=theme.WINDOW)
         bar.pack(fill="x")
-        ttk.Label(bar, text="MCD LOADER", style="Title.TLabel").pack(side="left", padx=(0, 28))
+        self.page_title = tk.Label(bar, text="", bg=theme.WINDOW, fg=theme.FG, font=("Segoe UI Semibold", 16))
+        self.page_title.pack(side="left", padx=(14, 18), pady=(14, 12))
+        if self.border:
+            shell.WindowButtons(bar, self.border.minimize, self.border.toggle_maximize, self.on_close).pack(
+                side="right", anchor="n", padx=(8, 6), pady=(6, 0))
+            self.border.drag_handle(bar)
+            self.border.drag_handle(self.page_title)
+        shell.CanvasButton(bar, "Применить в игре", self.apply_to_game, icon="✔", bg=theme.WINDOW).pack(
+            side="right", pady=(12, 10))
         self.save_var = tk.StringVar()
-        self.save_box = ttk.Combobox(bar, textvariable=self.save_var, state="readonly", width=40)
-        self.save_box.pack(side="left")
+        ttk.Button(bar, text="…", style="Icon.TButton", width=3, command=self.browse_save).pack(side="right", padx=(2, 10))
+        ttk.Button(bar, text="⟳", style="Icon.TButton", width=3, command=self.reload_save).pack(side="right")
+        self.save_box = ttk.Combobox(bar, textvariable=self.save_var, state="readonly", width=36)
+        self.save_box.pack(side="right", padx=(0, 4))
         self.save_box.bind("<<ComboboxSelected>>", lambda e: self.open_selected_save())
-        ttk.Button(bar, text="⟳", style="Icon.TButton", width=3, command=self.reload_save).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="…", style="Icon.TButton", width=3, command=self.browse_save).pack(side="left")
-        ttk.Button(bar, text="⌕", style="Icon.TButton", width=3, command=self.add_item).pack(side="right")
-        ttk.Button(bar, text="⚙", style="Icon.TButton", width=3, command=lambda: self.show_page(3)).pack(side="right")
-        ttk.Button(bar, text="▶  Игра", command=self.start_game).pack(side="right", padx=(0, 10))
-        ttk.Button(bar, text="✔  Применить в игре", style="Accent.TButton",
-                   command=self.apply_to_game).pack(side="right", padx=(0, 8))
-        hint = f"{self.cfg.get('hotkey', 'F8')} — показать / скрыть" if self.hotkey.available else ""
-        ttk.Label(bar, text=hint, style="WindowMuted.TLabel").pack(side="right", padx=12)
-        tk.Frame(self.root, bg=theme.BORDER, height=1).pack(fill="x")
 
     def _build_sidebar(self, parent):
-        side = ttk.Frame(parent, style="Window.TFrame", padding=(10, 14, 10, 10))
+        side = tk.Frame(parent, bg=theme.WINDOW, width=212)
         side.pack(side="left", fill="y")
-        self.nav_buttons = {}
-        for index in self.NAV_ORDER:
+        side.pack_propagate(False)
+        brand = tk.Frame(side, bg=theme.WINDOW)
+        brand.pack(fill="x", padx=16, pady=(14, 14))
+        self._brand_logo = None
+        try:
+            from PIL import Image, ImageTk
+            with Image.open(chrome.asset_path("mark.png")) as im:
+                self._brand_logo = ImageTk.PhotoImage(im.convert("RGBA").resize((30, 30), Image.LANCZOS), master=side)
+        except Exception:
+            pass
+        logo = tk.Label(brand, image=self._brand_logo, bg=theme.WINDOW)
+        logo.pack(side="left")
+        names = tk.Frame(brand, bg=theme.WINDOW)
+        names.pack(side="left", padx=(10, 0))
+        tk.Label(names, text="Minecraft Dungeons", bg=theme.WINDOW, fg=theme.FG, font=("Segoe UI", 10, "bold")).pack(
+            anchor="w")
+        tk.Label(names, text="Модуль лаунчера", bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 9)).pack(anchor="w")
+        if self.border:
+            for w in (brand, logo, names):
+                self.border.drag_handle(w)
+        self.nav_items = {}
+        nav = tk.Frame(side, bg=theme.WINDOW)
+        nav.pack(fill="x", padx=12)
+        if self.on_back:
+            shell.NavItem(nav, "←", "Библиотека", self.go_back).pack(fill="x", pady=(0, 6))
+        for index in self.NAV_MAIN:
             icon, title = self.PAGES[index]
-            button = ttk.Button(side, text=f"{icon:<3}  {title}", style="Nav.TButton", width=16,
-                                command=lambda i=index: self.show_page(i))
-            button.pack(fill="x", pady=2)
-            self.nav_buttons[index] = button
-        self.nav_indicator = chrome.SlidingIndicator(side, self.animator)
-        tk.Frame(parent, bg=theme.BORDER, width=1).pack(side="left", fill="y")
+            item = shell.NavItem(nav, icon, title, lambda i=index: self.show_page(i))
+            item.pack(fill="x", pady=1)
+            self.nav_items[index] = item
+        tk.Frame(side, bg=theme.BORDER, height=1).pack(fill="x", padx=16, pady=12)
+        tk.Label(side, text="Быстрый запуск", bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 9)).pack(
+            anchor="w", padx=24, pady=(0, 4))
+        quick = tk.Frame(side, bg=theme.WINDOW)
+        quick.pack(fill="x", padx=12)
+        shell.NavItem(quick, "▶", "Запустить игру", self.launch_with_animation, chevron=True, bold=True).pack(
+            fill="x", pady=1)
+        for index in self.NAV_QUICK:
+            icon, title = self.PAGES[index]
+            item = shell.NavItem(quick, icon, title, lambda i=index: self.show_page(i))
+            item.pack(fill="x", pady=1)
+            self.nav_items[index] = item
+        from . import __version__
+        hint = f"{self.cfg.get('hotkey', 'F8')} — показать / скрыть" if self.hotkey.available else ""
+        tk.Label(side, text=f"v{__version__}   {hint}", bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 8)).pack(
+            side="bottom", anchor="w", padx=24, pady=12)
+
+    def go_back(self):
+        self.commit_forms()
+        if self.on_back:
+            self.on_back()
 
     def show_page(self, index):
+        if self.notebook.index("current") == index:
+            return
+        self.page_cover.place(in_=self.notebook, relx=0, rely=0, relwidth=1, relheight=1)
+        self.page_cover.lift()
         self.notebook.select(index)
+        self.top_progress.sweep(280, done=self.page_cover.place_forget)
 
     def _highlight_nav(self):
         current = self.notebook.index("current")
-        for index, button in self.nav_buttons.items():
-            button.configure(style="NavActive.TButton" if index == current else "Nav.TButton")
-        if current in self.nav_buttons:
-            self.nav_indicator.move_to(self.nav_buttons[current])
+        for index, item in self.nav_items.items():
+            item.set_active(index == current)
+        self.page_title.configure(text=self.PAGES[current][1])
 
     def _labeled(self, parent, row, text, widget):
         ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 12))
@@ -149,9 +218,300 @@ class LoaderApp:
         return widget
 
     def _page(self, title):
-        tab = ttk.Frame(self.notebook)
+        tab = ttk.Frame(self.notebook, style="Page.TFrame", padding=(0, 6, 0, 0))
         self.notebook.add(tab, text=title)
         return tab
+    # ------------------------------------------------------------ home page
+    def _build_home_tab(self):
+        tab = self._page("Главная")
+        right = ttk.Frame(tab, style="Page.TFrame", width=270)
+        right.pack(side="right", fill="y", padx=(16, 0))
+        right.pack_propagate(False)
+        left = ttk.Frame(tab, style="Page.TFrame")
+        left.pack(side="left", fill="both", expand=True)
+
+        self._slide_logo = chrome.load_logo(self.root, 50)
+        self.carousel = shell.Carousel(left, self._home_slides(), width=560, height=300)
+        self.carousel.pack(fill="x")
+        self.carousel.show(0, animate=False)
+
+        head = ttk.Frame(left, style="Page.TFrame")
+        head.pack(fill="x", pady=(14, 8))
+        tk.Label(head, text="Мои персонажи", bg=theme.PAGE, fg=theme.FG, font=("Segoe UI", 11, "bold")).pack(side="left")
+        self.chars_count = shell.pill(head, "0", theme.MUTED, "#1d1e25")
+        self.chars_count.pack(side="left", padx=8)
+        link = tk.Label(head, text="Открыть .dat  ›", bg=theme.PAGE, fg=theme.ACCENT_HOVER, cursor="hand2",
+                        font=("Segoe UI", 9, "bold"))
+        link.pack(side="right")
+        link.bind("<Button-1>", lambda e: self.browse_save())
+        self.chars_grid = ttk.Frame(left, style="Page.TFrame")
+        self.chars_grid.pack(fill="both", expand=True)
+
+        news = theme.RoundedBox(right, bg=theme.PAGE, outline=theme.BORDER, radius=12, pad=6, fill_height=True,
+                                frame_style="Page.TFrame")
+        news.pack(fill="both", expand=True)
+        top = ttk.Frame(news.inner, style="Page.TFrame", padding=(10, 8, 10, 6))
+        top.pack(fill="x")
+        tk.Label(top, text="Новости", bg=theme.PAGE, fg=theme.FG, font=("Segoe UI", 11, "bold")).pack(side="left")
+        entries = [
+            ("ⓘ", theme.ACCENT_HOVER, "31 окт 2026", "Новый лаунчер",
+             "Окно без рамки, экран загрузки, главная страница и проверка системы."),
+            ("✓", theme.GREEN, "31 окт 2026", "Все предметы с иконками",
+             "Каталог берётся из файлов игры: предметы, зачарования и русские названия."),
+            ("✓", theme.GREEN, "31 окт 2026", "Мод: ходьба на WASD",
+             "W/A/S/D двигают персонажа через виртуальный геймпад — и в мире друга тоже."),
+        ]
+        shell.pill(top, str(len(entries)), theme.MUTED, "#1d1e25").pack(side="left", padx=8)
+        box = theme.RoundedBox(news.inner, bg=theme.CARD, outline=theme.BORDER, radius=10, pad=4)
+        box.pack(fill="x", padx=8, pady=(4, 8))
+        for k, (icon, color, date, title, text) in enumerate(entries):
+            if k:
+                tk.Frame(box.inner, bg=theme.BORDER, height=1).pack(fill="x", padx=6)
+            e = ttk.Frame(box.inner, style="Card.TFrame", padding=(10, 8))
+            e.pack(fill="x")
+            row = ttk.Frame(e, style="Card.TFrame")
+            row.pack(fill="x")
+            tk.Label(row, text=icon, bg=theme.CARD, fg=color, font=("Segoe UI", 10)).pack(side="left")
+            tk.Label(row, text=date, bg=theme.CARD, fg=theme.DIM, font=("Segoe UI", 8)).pack(side="right")
+            tk.Label(e, text=title, bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 10, "bold"), justify="left",
+                     wraplength=200).pack(anchor="w", pady=(2, 0))
+            tk.Label(e, text=text, bg=theme.CARD, fg=theme.MUTED, font=("Segoe UI", 9), justify="left",
+                     wraplength=200).pack(anchor="w")
+
+    def _home_slides(self):
+        icon_paths = self._showcase_icons()
+        return [
+            {"art": shell.banner_art(icon_paths, (24, 52, 120)), "logo": self._slide_logo, "title": "Minecraft Dungeons",
+             "badge": "MOD", "text": "Редактор сохранений, все предметы игры и ходьба на WASD — прямо поверх игры.",
+             "tag": f"{self.cfg.get('hotkey', 'F8')} — открыть поверх игры",
+             "button": ("▶  Играть", self.launch_with_animation), "note": "Запуск через лаунчер"},
+            {"art": shell.banner_art(icon_paths[3:], (70, 40, 120)), "title": "Все предметы игры", "badge": "NEW",
+             "text": "Каталог оружия, брони, артефактов и зачарований с иконками. Добавляйте в инвентарь в один клик.",
+             "tag": "Каталог из файлов игры", "button": ("＋  Добавить предмет", self._home_add_item)},
+            {"art": shell.banner_art(icon_paths[6:], (20, 90, 90)), "title": "Редактор персонажа",
+             "text": "Уровень, изумруды, золото, сложность и угрозы. Изменения — кнопкой «Применить в игре».",
+             "tag": "Бэкап перед каждым применением", "button": ("Открыть", lambda: self.show_page(0))},
+            {"art": shell.banner_art(icon_paths[1:], (40, 70, 140)), "title": "Ходьба на WASD",
+             "text": "W/A/S/D и стрелки двигают персонажа, Shift — шагом. Работает и в мире друга.",
+             "tag": "Виртуальный геймпад", "button": ("Настроить", lambda: self.show_page(4))},
+        ]
+
+    def _home_add_item(self):
+        self.show_page(1)
+        self.root.after(320, self.add_item)
+
+    def _showcase_icons(self):
+        if not self.catalog or not self.catalog.loaded:
+            return []
+        ids = sorted((i for i in self.catalog.items if "_Unique" in i), key=lambda i: hash(i) % 997)
+        paths = []
+        for ident in ids + list(self.catalog.items):
+            p = self.catalog.icon_file("item", ident, extract=False)
+            if p and p not in paths:
+                paths.append(p)
+            if len(paths) >= 12:
+                break
+        return paths
+
+    def _refresh_home_art(self):
+        self.carousel.slides = self._home_slides()
+        self.carousel._images.clear()
+        self.carousel.show(self.carousel.index, animate=False)
+
+    def _refresh_home_chars(self):
+        if not hasattr(self, "chars_grid"):
+            return
+        for w in self.chars_grid.winfo_children():
+            w.destroy()
+        self.chars_count.configure(text=f" {len(self.save_infos)} ")
+        if not self.save_infos:
+            tk.Label(self.chars_grid, text="Сохранения не найдены — нажмите «Открыть .dat».", bg=theme.PAGE,
+                     fg=theme.MUTED).pack(anchor="w")
+            return
+        for k, info in enumerate(self.save_infos[:6]):
+            box = theme.RoundedBox(self.chars_grid, bg=theme.CARD, outline=theme.BORDER, radius=10, pad=4)
+            box.grid(row=k // 3, column=k % 3, sticky="we", padx=(0, 10), pady=(0, 10))
+            self.chars_grid.columnconfigure(k % 3, weight=1, uniform="chars")
+            inner = ttk.Frame(box.inner, style="Card.TFrame", padding=(10, 8))
+            inner.pack(fill="x")
+            widgets = [box, inner,
+                       tk.Label(inner, text=info["name"], bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 10, "bold")),
+                       tk.Label(inner, text=f"Уровень {info['level']}", bg=theme.CARD, fg=theme.ACCENT_HOVER,
+                                font=("Segoe UI", 9)),
+                       tk.Label(inner, text=info["when"], bg=theme.CARD, fg=theme.DIM, font=("Segoe UI", 8))]
+            for w in widgets[2:]:
+                w.pack(anchor="w")
+            for w in widgets:
+                w.configure(cursor="hand2")
+                w.bind("<Button-1>", lambda e, p=info["path"]: self._open_character(p))
+
+    def _open_character(self, path):
+        if path in self.saves:
+            self.save_box.current(self.saves.index(path))
+            self.open_selected_save()
+        self.show_page(0)
+
+    # ---------------------------------------------------------- system page
+    def _build_system_tab(self):
+        tab = self._page("Система")
+        summary = theme.RoundedBox(tab, bg=theme.CARD, outline=theme.BORDER, radius=12, pad=6)
+        summary.pack(fill="x")
+        inner = ttk.Frame(summary.inner, style="Card.TFrame", padding=(10, 8))
+        inner.pack(fill="x")
+        self.sys_icon = tk.Label(inner, text="✓", width=3, height=1, font=("Segoe UI", 14, "bold"),
+                                 bg="#12301f", fg=theme.GREEN, pady=6)
+        self.sys_icon.pack(side="left")
+        texts = ttk.Frame(inner, style="Card.TFrame")
+        texts.pack(side="left", padx=14)
+        self.sys_title = tk.Label(texts, text="", bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 12, "bold"))
+        self.sys_title.pack(anchor="w")
+        self.sys_sub = tk.Label(texts, text="", bg=theme.CARD, fg=theme.MUTED, font=("Segoe UI", 9))
+        self.sys_sub.pack(anchor="w")
+        self.sys_fix = shell.CanvasButton(inner, "Исправить всё", self.fix_all, icon="🔧", bg=theme.CARD)
+        self.sys_fix.pack(side="right")
+        shell.CanvasButton(inner, "Обновить", self.run_checks, primary=False, icon="⟳", bg=theme.CARD).pack(
+            side="right", padx=8)
+
+        head = ttk.Frame(tab, style="Page.TFrame")
+        head.pack(fill="x", pady=(16, 8))
+        tk.Label(head, text="Проверки", bg=theme.PAGE, fg=theme.FG, font=("Segoe UI", 11, "bold")).pack(side="left")
+        self.sys_bad = tk.Label(head, text="", bg=theme.PAGE, fg=theme.RED, font=("Segoe UI", 9, "bold"))
+        self.sys_bad.pack(side="right")
+        self.sys_good = tk.Label(head, text="", bg=theme.PAGE, fg=theme.GREEN, font=("Segoe UI", 9, "bold"))
+        self.sys_good.pack(side="right")
+        self.sys_box = theme.RoundedBox(tab, bg=theme.CARD, outline=theme.BORDER, radius=12, pad=4)
+        self.sys_box.pack(fill="x")
+
+    def system_checks(self):
+        """(title, ok, description, hint, fix) — ok None means informational."""
+        checks = []
+        paks = self.paks_dir
+        checks.append(("Игра установлена", bool(paks), paks or "Папка с файлами игры не найдена",
+                       "" if paks else "Укажите папку игры", self.choose_game_folder))
+        cat = self.catalog if self.catalog and self.catalog.loaded else None
+        checks.append(("Файлы игры прочитаны", bool(cat),
+                       f"Ключ {cat.version}, предметов: {len(cat.items)}" if cat else (self.catalog_error or "Не загружены"),
+                       "" if cat else "Перечитать файлы игры", lambda: self.load_catalog(force=True)))
+        ok_icons, failed_icons, _ = cat.icon_stats() if cat else (0, 0, "")
+        checks.append(("Иконки предметов", bool(ok_icons), f"Извлечено: {ok_icons}" +
+                       (f", не удалось: {failed_icons}" if failed_icons else ""),
+                       "" if ok_icons else "Повторить извлечение", lambda: self.load_catalog(force=True)))
+        checks.append(("Сохранения персонажей", bool(self.saves), f"Найдено: {len(self.saves)}",
+                       "" if self.saves else "Открыть .dat вручную", self.browse_save))
+        if game.IS_WINDOWS:
+            drv = wasd_mod.driver_installed()
+            checks.append(("Драйвер геймпада (WASD)", drv, "ViGEmBus установлен" if drv else "Нужен для ходьбы на WASD",
+                           "" if drv else "Установить драйвер", self._install_driver))
+        checks.append(("Горячая клавиша", self.hotkey.available,
+                       f"{self.cfg.get('hotkey', 'F8')} показывает окно поверх игры" if self.hotkey.available
+                       else "Работает только в Windows", "", None))
+        checks.append(("Резервные копии", bool(self.cfg.get("backup_on_apply", True)),
+                       "Бэкап перед каждым применением", "" if self.cfg.get("backup_on_apply", True) else "Включить",
+                       self._enable_backups))
+        running = game.is_game_running()
+        checks.append(("Игра запущена", None, "Minecraft Dungeons запущена" if running else "Игра сейчас не запущена",
+                       "", None))
+        return checks
+
+    def run_checks(self):
+        checks = self.system_checks()
+        self._checks = checks
+        for w in self.sys_box.inner.winfo_children():
+            w.destroy()
+        grid = ttk.Frame(self.sys_box.inner, style="Card.TFrame")
+        grid.pack(fill="x")
+        for k, (title, ok, desc, hint, _fix) in enumerate(checks):
+            cell = ttk.Frame(grid, style="Card.TFrame", padding=(12, 9))
+            cell.grid(row=k // 2, column=k % 2, sticky="nsew")
+            grid.columnconfigure(k % 2, weight=1, uniform="checks")
+            mark, color = ("✓", theme.GREEN) if ok or ok is None else ("✕", theme.RED)
+            tk.Label(cell, text=mark, bg=theme.CARD, fg=color if ok is not None else theme.DIM,
+                     font=("Segoe UI", 11, "bold")).pack(side="left", anchor="n", padx=(0, 10))
+            texts = ttk.Frame(cell, style="Card.TFrame")
+            texts.pack(side="left", fill="x", expand=True)
+            tk.Label(texts, text=title, bg=theme.CARD, fg=theme.FG, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+            tk.Label(texts, text=desc, bg=theme.CARD, fg=theme.MUTED, font=("Segoe UI", 9), wraplength=300,
+                     justify="left").pack(anchor="w")
+            if hint and not ok:
+                tk.Label(texts, text=hint, bg=theme.CARD, fg=theme.DIM, font=("Segoe UI", 8)).pack(anchor="w")
+            if ok is None:
+                badge = shell.pill(cell, "—", theme.DIM, "#1d1e25")
+            elif ok:
+                badge = shell.pill(cell, "OK", theme.MUTED, "#1d1e25")
+            else:
+                badge = shell.pill(cell, "Проблема", theme.RED, "#2a1416")
+            badge.pack(side="right", anchor="n")
+        issues = [c for c in checks if c[1] is False]
+        passed = sum(1 for c in checks if c[1])
+        self.sys_good.configure(text=f"{passed} пройдено")
+        self.sys_bad.configure(text=f"  ·  {len(issues)} проблем(ы)" if issues else "")
+        if issues:
+            self.sys_icon.configure(text="✕", bg="#2a1416", fg=theme.RED)
+            self.sys_title.configure(text="Найдены проблемы")
+            self.sys_sub.configure(text=f"{len(issues)} проблем(ы) требуют внимания.")
+        else:
+            self.sys_icon.configure(text="✓", bg="#12301f", fg=theme.GREEN)
+            self.sys_title.configure(text="Всё в порядке")
+            self.sys_sub.configure(text="Загрузчик готов к работе.")
+        self.sys_fix.enabled = bool([c for c in issues if c[4]])
+        self.sys_fix.draw()
+        if self.SYSTEM in self.nav_items:
+            self.nav_items[self.SYSTEM].set_badge("⚠" if issues else None)
+
+    def fix_all(self):
+        for _title, ok, _desc, _hint, fix in getattr(self, "_checks", []):
+            if ok is False and fix:
+                fix()
+        self.root.after(600, self.run_checks)
+
+    def _install_driver(self):
+        installer = wasd_mod.driver_installer()
+        if installer and messagebox.askyesno("Драйвер геймпада", "Установить драйвер ViGEmBus для ходьбы на WASD?\n"
+                                             "Windows попросит права администратора.", parent=self.root):
+            os.startfile(installer)  # noqa: S606 - bundled msi
+        elif not installer:
+            messagebox.showinfo("Драйвер геймпада", "Установщик ViGEmBus не найден в сборке. Скачайте его с "
+                                "github.com/nefarius/ViGEmBus/releases.", parent=self.root)
+
+    def _enable_backups(self):
+        self.cfg["backup_on_apply"] = True
+        self.set_backup.set(True)
+        game.save_config(self.cfg)
+
+    # ------------------------------------------------------------ launching
+    def launch_with_animation(self):
+        """Launcher-style start: loading screen with the logo until the game process appears."""
+        view = shell.LoadingView(self.root, status="Запуск Minecraft Dungeons…")
+        view.place(relx=0, rely=0, relwidth=1, relheight=1)
+        view.raise_view()
+        try:
+            started = game.launch_game(self.cfg)
+            logging.info("launch: %s", started)
+        except Exception as e:
+            view.stop()
+            view.destroy()
+            messagebox.showerror("Запуск игры", str(e), parent=self.root)
+            return
+        deadline = time.time() + 90
+        view.set_status("Запуск Minecraft Dungeons…  Не закрывайте это окно")
+
+        def wait():
+            if game.is_game_running() or not game.IS_WINDOWS:
+                view.set_status(f"Игра запущена. {self.cfg.get('hotkey', 'F8')} — открыть MCD Loader поверх игры")
+                self.root.after(1800, finish)
+            elif time.time() > deadline:
+                view.set_status("Игра не появилась за 90 секунд")
+                self.root.after(2500, finish)
+            else:
+                self.root.after(1000, wait)
+
+        def finish():
+            view.stop()
+            view.destroy()
+            if self.hotkey.available and game.is_game_running():
+                self.hide()
+        self.root.after(1500, wait)
+
 
     def _build_character_tab(self):
         tab = self._page("Персонаж")
@@ -265,16 +625,16 @@ class LoaderApp:
         grid = ttk.Frame(col_a, style="Card.TFrame")
         grid.pack(fill="x")
         type_row = ttk.Frame(grid, style="Card.TFrame")
-        self.type_box = ttk.Combobox(type_row, textvariable=self.it_type, width=17)
+        self.type_box = ttk.Combobox(type_row, textvariable=self.it_type, width=14)
         self.type_box.pack(side="left")
         ttk.Button(type_row, text="…", width=2, command=self._pick_type).pack(side="left", padx=(3, 0))
         theme.card_row(grid, 0, "Тип (ID)", type_row, muted=True)
         self.it_type.trace_add("write", lambda *_: self._update_item_header())
         theme.card_row(grid, 1, "Уровень силы", ttk.Spinbox(grid, from_=0, to=10000, textvariable=self.it_level,
-                                                             width=19), muted=True)
+                                                             width=15), muted=True)
         theme.card_row(grid, 2, "Редкость", ttk.Combobox(grid, textvariable=self.it_rarity, values=gd.RARITIES,
-                                                         state="readonly", width=19), muted=True)
-        theme.card_row(grid, 3, "Слот", ttk.Combobox(grid, textvariable=self.it_slot, state="readonly", width=19,
+                                                         state="readonly", width=15), muted=True)
+        theme.card_row(grid, 3, "Слот", ttk.Combobox(grid, textvariable=self.it_slot, state="readonly", width=15,
                                                      values=[NO_SLOT] + gd.EQUIPMENT_SLOTS), muted=True)
         for row, (text, var) in enumerate((("Улучшен (алмаз)", self.it_upgraded), ("Подарок", self.it_gifted),
                                            ("Отмечен как новый", self.it_new)), start=4):
@@ -289,7 +649,7 @@ class LoaderApp:
         theme.Toggle(gild, self.gild_on).pack(side="right")
         gild_row = ttk.Frame(col_a, style="Card.TFrame")
         gild_row.pack(fill="x", pady=(4, 0))
-        self.gild_box = ttk.Button(gild_row, style="Ench.TButton", compound="left", width=22,
+        self.gild_box = ttk.Button(gild_row, style="Ench.TButton", compound="left", width=18,
                                    command=lambda: self._pick_enchantment(None))
         self.gild_box.pack(side="left")
         self.gild_id.trace_add("write", lambda *_: self._update_ench_button(self.gild_box, self.gild_id))
@@ -304,7 +664,7 @@ class LoaderApp:
         row.pack(fill="x", pady=(4, 0))
         self.prop_id = tk.StringVar(value=gd.DEFAULT_ARMOR_PROPERTY)
         self.prop_rarity = tk.StringVar(value="Common")
-        self.prop_box = ttk.Combobox(row, textvariable=self.prop_id, width=16)
+        self.prop_box = ttk.Combobox(row, textvariable=self.prop_id, width=13)
         self.prop_box.pack(side="left")
         ttk.Combobox(row, textvariable=self.prop_rarity, values=gd.RARITIES, state="readonly",
                      width=8).pack(side="left", padx=3)
@@ -318,7 +678,7 @@ class LoaderApp:
             for k in range(3):
                 index = s * 3 + k
                 id_var, lvl_var = tk.StringVar(value=gd.UNSET_ENCHANTMENT), tk.StringVar(value="0")
-                button = ttk.Button(body, style="Ench.TButton", compound="left", width=22,
+                button = ttk.Button(body, style="Ench.TButton", compound="left", width=18,
                                     command=lambda i=index: self._pick_enchantment(i))
                 button.grid(row=k, column=0, pady=2, sticky="we")
                 ttk.Spinbox(body, from_=0, to=3, textvariable=lvl_var, width=3).grid(row=k, column=1, padx=(6, 0))
@@ -443,15 +803,19 @@ class LoaderApp:
         if select and os.path.isfile(select) and select not in self.saves:
             self.saves.insert(0, select)
         labels = []
+        self.save_infos = []
         for path in self.saves:
             try:
                 profile = read_profile(path)
                 level = gd.level_for_xp(int(profile.get("xp") or 0))
                 name = profile.get("name") or os.path.splitext(os.path.basename(path))[0]
                 labels.append(f"{name} — ур. {level} — …{path[-40:]}")
+                when = time.strftime("Изменён %d.%m.%Y %H:%M", time.localtime(os.path.getmtime(path)))
+                self.save_infos.append({"path": path, "name": name, "level": level, "when": when})
             except Exception as e:  # unreadable file: still list it so the error is visible on open
                 labels.append(f"[ошибка: {e}] {path}")
         self.save_box["values"] = labels
+        self._refresh_home_chars()
         if not self.saves:
             self.status_var.set("Сохранения не найдены. Нажмите «Открыть .dat…» и укажите файл из папки Characters.")
             return
@@ -672,7 +1036,7 @@ class LoaderApp:
         self.gild_lvl.set(str((gilded or {}).get("level", 1)))
         self.armor_props = [dict(p) for p in item.get("armorproperties") or []]
         self._refresh_props()
-        self.editor.configure(text="⚔  Предмет")
+        self.editor.configure(text="Предмет")
         self._update_item_header()
 
     def _refresh_props(self):
@@ -997,15 +1361,19 @@ class LoaderApp:
         if self.save and self.save.dirty and not messagebox.askyesno(
                 "Выход", "Есть непримененные изменения. Выйти без применения?", parent=self.root):
             return
+        self.shutdown()
+        self.root.destroy()
+
+    def shutdown(self):
         self._icon_thread_stop.set()
         self.wasd.stop()
-        self.root.destroy()
 
     # ------------------------------------------------- game catalog/icons
     def load_catalog(self, force=False):
         """Read the game's paks in the background: full item list, names and icons."""
         paks_dir = cat_mod.find_paks_dir(self.cfg.get("paks_dir", ""), self.cfg.get("game_path", ""))
         logging.info("paks dir: %s", paks_dir)
+        self.paks_dir = paks_dir
         if not paks_dir:
             self.catalog_status.set("Файлы игры не найдены — укажите папку игры")
             self.show_banner("Файлы игры не найдены, поэтому нет иконок и полного списка предметов. "
@@ -1017,11 +1385,16 @@ class LoaderApp:
         self._icon_thread_stop = threading.Event()
         stop = self._icon_thread_stop
         cache_dir = os.path.join(game.CACHE_DIR, "catalog")
+        self.catalog_error = None
         if force:
             try:
                 os.remove(os.path.join(cache_dir, "catalog.json"))
             except OSError:
                 pass
+            icons_dir = os.path.join(cache_dir, "icons")
+            for name in os.listdir(icons_dir) if os.path.isdir(icons_dir) else []:
+                if name.endswith(".failed"):
+                    os.remove(os.path.join(icons_dir, name))
         self.catalog_status.set(f"Файлы игры: чтение {paks_dir}…")
 
         def work():
@@ -1031,8 +1404,9 @@ class LoaderApp:
             except Exception as e:
                 logging.exception("catalog load failed for %s", paks_dir)
                 message = f"Не удалось прочитать файлы игры: {e}"
+                self.catalog_error = str(e)
                 self._ui_queue.put(lambda: (self.catalog_status.set(message), self.show_banner(
-                    f"{message}. Подробности — в файле {game.LOG_PATH}")))
+                    f"{message}. Подробности — в файле {game.LOG_PATH}"), self.run_checks()))
                 return
             logging.info("catalog: %s items, %s enchantments, version %s, language %s", len(catalog.items),
                          len(catalog.enchantments), catalog.version, catalog.language)
@@ -1062,6 +1436,7 @@ class LoaderApp:
             f"зачарований {len(catalog.enchantments)}, свойств брони {len(catalog.armor_properties)}, "
             f"язык {catalog.language or '—'}. Иконки извлекаются…")
         self._refresh_after_catalog()
+        self.run_checks()
 
     def show_banner(self, text):
         self.banner_text.set(text)
@@ -1100,6 +1475,8 @@ class LoaderApp:
                              f"Пришлите файл {game.LOG_PATH} — по нему видно причину.")
         self.icons.set_catalog(self.catalog)
         self.catalog_status.set(self.catalog_status.get().replace("Иконки извлекаются…", "Иконки готовы."))
+        self._refresh_home_art()
+        self.run_checks()
         self._refresh_after_catalog()
 
     def _refresh_after_catalog(self):
@@ -1217,18 +1594,5 @@ class LoaderApp:
 
 
 def run(initial_save=None, launch=None):
-    game.setup_logging()
-    cfg = game.load_config()
-    root = tk.Tk()
-    root.withdraw()
-    from . import __version__
-    splash = chrome.Splash(root, version=f"v{__version__}")
-    splash.step("Запуск", 0.05)
-    app = LoaderApp(root, cfg, initial_save=initial_save, splash=splash)
-
-    def reveal():
-        app.show()
-        if launch if launch is not None else cfg.get("launch_game"):
-            app.start_game()
-    splash.finish(reveal)
-    root.mainloop()
+    from . import hub
+    hub.run(initial_save=initial_save, launch=launch)

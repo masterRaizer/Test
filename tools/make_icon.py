@@ -53,8 +53,31 @@ def draw(size=S):
     return img
 
 
+def draw_mark(size=S):
+    """The gem alone on a transparent background (splash and sidebar logo)."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    cx, top, mid, bot = size / 2, size * 0.10, size * 0.38, size * 0.95
+    left, right = size * 0.02, size * 0.98
+    crown_l, crown_r = size * 0.24, size * 0.76
+    t = lambda *p: [tuple(x) for x in p]  # noqa: E731
+    for poly, color in [
+        (t((left, mid), (crown_l, top), (cx, mid)), (111, 147, 255)),
+        (t((crown_l, top), (crown_r, top), (cx, mid)), (160, 186, 255)),
+        (t((crown_r, top), (right, mid), (cx, mid)), (86, 126, 248)),
+        (t((left, mid), (cx, mid), (cx, bot)), (45, 100, 240)),
+        (t((cx, mid), (right, mid), (cx, bot)), (30, 70, 200)),
+    ]:
+        d.polygon(poly, fill=color + (255,))
+    for a, b in [((left, mid), (right, mid)), ((crown_l, top), (cx, mid)), ((crown_r, top), (cx, mid)),
+                 ((cx, mid), (cx, bot))]:
+        d.line([a, b], fill=(220, 230, 255, 150), width=int(size * 0.01))
+    return img
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
+    draw_mark().resize((256, 256), Image.LANCZOS).save(os.path.join(OUT, "mark.png"))
     big = draw()
     big.resize((256, 256), Image.LANCZOS).save(os.path.join(OUT, "logo.png"))
     big.resize((256, 256), Image.LANCZOS).save(os.path.join(OUT, "launcher.ico"),
