@@ -13,8 +13,8 @@ from . import catalog as cat_mod, chrome, game, gamedata as gd, shell, theme
 from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
 from . import wasd as wasd_mod
 from .wasd import WasdMovement, WasdUnavailable
-from .savefile import (SaveFile, clear_enchantments, find_saves, item_level, max_out_enchantments,
-                       read_profile, set_enchantment, set_item_level)
+from .savefile import (CLIP_MARK, SaveFile, clear_enchantments, copy_enchantments, find_saves, item_level,
+                       max_out_enchantments, paste_enchantments, read_profile, set_enchantment, set_item_level)
 
 BG, PANEL, FG, MUTED, ACCENT, WARN = theme.PAGE, theme.INPUT, theme.FG, theme.MUTED, theme.ACCENT, theme.WARN
 NO_SLOT = "(не надет)"
@@ -65,6 +65,7 @@ class LoaderApp:
         self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
         self._catalog_gen = 0           # ignores results of an older catalog load
         self._jobs = {}                 # periodic after() callbacks, cancelled on shutdown
+        self._ench_clip = None          # last copied enchantments (also put on the system clipboard)
         self._last_running = False
         self._last_tab = None
 
@@ -634,6 +635,7 @@ class LoaderApp:
         scroll.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_item_selected)
+        self.tree.bind("<Control-KeyPress>", self._tree_shortcut)
 
     def _build_item_editor(self, parent):
         ed = ttk.Frame(parent)
@@ -710,7 +712,7 @@ class LoaderApp:
         self.ench_vars = []
         self.ench_boxes = []
         for s in range(3):
-            body = theme.card(col_b_outer, f"Зачарования · слот {s + 1}", pack={"fill": "x", "pady": (0, 8)})
+            body = theme.card(col_b_outer, f"Зачарования · слот {s + 1}", pack={"fill": "x", "pady": (0, 5)})
             for k in range(3):
                 index = s * 3 + k
                 id_var, lvl_var = tk.StringVar(value=gd.UNSET_ENCHANTMENT), tk.StringVar(value="0")
@@ -722,8 +724,17 @@ class LoaderApp:
                 self._update_ench_button(button, id_var)
                 self.ench_vars.append((id_var, lvl_var))
                 self.ench_boxes.append(button)
+        clip = ttk.Frame(col_b_outer)
+        clip.pack(fill="x", pady=(0, 4))
+        ttk.Button(clip, text="Копировать чары", command=self.copy_item_enchantments).grid(
+            row=0, column=0, sticky="we", padx=(0, 3))
+        ttk.Button(clip, text="Вставить чары", command=self.paste_item_enchantments).grid(
+            row=0, column=1, sticky="we", padx=(3, 0))
+        clip.columnconfigure(0, weight=1)
+        clip.columnconfigure(1, weight=1)
+        ttk.Label(col_b_outer, text="Ctrl+C / Ctrl+V в списке предметов", style="Muted.TLabel").pack(anchor="w")
         ttk.Button(col_b_outer, text="Снять все чары с предмета", command=self.clear_item_enchantments).pack(
-            fill="x", pady=(0, 6))
+            fill="x", pady=(4, 6))
         ttk.Button(col_b_outer, text="Сохранить предмет", style="Accent.TButton",
                    command=self.commit_item).pack(fill="x", pady=(2, 0))
 
@@ -974,9 +985,9 @@ class LoaderApp:
                             + ("  ⚠ меньше нуля" if left < 0 else ""))
         self.points_info.set(
             f"Уровень {s.level}, потрачено {s.enchantment_points_spent()}, свободно {left}"
-            + (f", бонус {bonus} (эксперимент)" if bonus else "") + ".\n"
-            "«Через уровень» — надёжно, игра покажет новый уровень. «Бонус без уровня» — экспериментально, "
-            "проверьте в игре.")
+            + (f", бонус {bonus}" if bonus else "") + ".\n"
+            "«Через уровень» — поднимает уровень. «Бонус без уровня» — уровень не меняется. "
+            "«Убрать бонус» снимает бонус, где бы он ни лежал.")
         self.items_count_var.set(f"Предметов: {len(s.inventory)} в инвентаре, {len(s.chest)} в сундуке")
 
     def refresh_items(self):
@@ -1098,10 +1109,15 @@ class LoaderApp:
                             "Это экспериментально: примените и проверьте в игре.")
 
     def _points_clear_bonus(self):
-        if self.save:
-            self.save.set_bonus_points(0)
-            self.refresh_summary()
-            self.status_var.set("Бонусные очки убраны. Нажмите «Применить в игре».")
+        if not self.save:
+            return
+        self.commit_forms()
+        had = self.save.bonus_points()
+        self.save.set_bonus_points(0)
+        self.load_item_form(self.current_item)
+        self.refresh_items()
+        self.status_var.set(f"Бонус {had} очков убран отовсюду. Нажмите «Применить в игре» и выберите персонажа "
+                            "заново." if had else "Бонусных очков в сохранении нет.")
 
     def _quick_level_100(self):
         self.level_var.set("100")
@@ -1322,6 +1338,73 @@ class LoaderApp:
         self.refresh_items()
         self.status_var.set(f"Выбранные зачарования подняты до 3 на {changed} предмет(ах). "
                             "Невыбранные варианты не тронуты.")
+
+    def _tree_shortcut(self, event):
+        """Ctrl+C / Ctrl+V on the item list, on any keyboard layout (keycode 67/86 on Windows)."""
+        key = (event.keysym or "").lower()
+        if key in ("c", "cyrillic_es") or event.keycode == 67:
+            self.copy_item_enchantments()
+            return "break"
+        if key in ("v", "cyrillic_em") or event.keycode == 86:
+            self.paste_item_enchantments()
+            return "break"
+        return None
+
+    def copy_item_enchantments(self):
+        item = self.current_item
+        if not self.save or item is None:
+            return
+        self.commit_item(refresh=False)
+        if not item.get("enchantments") and not item.get("netheriteEnchant"):
+            self.status_var.set("У этого предмета нет зачарований — копировать нечего.")
+            return
+        payload = copy_enchantments(item)
+        payload["kind"] = self._item_kind(item)
+        self._ench_clip = payload
+        try:  # also to the system clipboard, so it survives switching saves or restarting
+            self.root.clipboard_clear()
+            self.root.clipboard_append(json.dumps(payload, ensure_ascii=False))
+        except tk.TclError:
+            pass
+        chosen = sum(1 for e in payload["enchantments"] if e.get("level"))
+        self.status_var.set(f"Скопированы чары «{self._item_name(item.get('type'))}»: выбрано {chosen}"
+                            + (", есть позолота" if payload.get("netheriteEnchant") else "")
+                            + ". Выберите другой предмет и нажмите Ctrl+V.")
+
+    def _clipboard_payload(self):
+        try:
+            data = json.loads(self.root.clipboard_get())
+            if isinstance(data, dict) and data.get(CLIP_MARK):
+                return data
+        except (tk.TclError, ValueError):
+            pass
+        return getattr(self, "_ench_clip", None)
+
+    def paste_item_enchantments(self):
+        item = self.current_item
+        if not self.save or item is None:
+            return
+        payload = self._clipboard_payload()
+        if not payload:
+            self.status_var.set("Сначала скопируйте чары с другого предмета (Ctrl+C).")
+            return
+        target = self._item_kind(item)
+        if target == "artifact":
+            messagebox.showinfo("Вставка чаров", "У артефактов нет зачарований.", parent=self.root)
+            return
+        source = payload.get("kind")
+        names = {"melee": "оружия ближнего боя", "ranged": "дальнего оружия", "armor": "брони"}
+        if source and target and source != target and not messagebox.askyesno(
+                "Вставка чаров", f"Чары скопированы с {names.get(source, source)}, а вставляются на "
+                f"{names.get(target, target).replace('оружия', 'оружие').replace('брони', 'броню')}. "
+                "Часть из них может не работать на этом предмете. Всё равно вставить?", parent=self.root):
+            return
+        self.commit_item(refresh=False)
+        paste_enchantments(item, payload)
+        self.save.dirty = True
+        self.load_item_form(item)
+        self.refresh_items()
+        self.status_var.set(f"Чары вставлены на «{self._item_name(item.get('type'))}». Нажмите «Применить в игре».")
 
     def clear_item_enchantments(self):
         if not self.save or self.current_item is None:

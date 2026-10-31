@@ -46,6 +46,10 @@ class ModuleUiTests(unittest.TestCase):
             mock.patch.object(catalog, "find_paks_dir", lambda *a, **k: None),
             mock.patch.object(overlay, "find_saves", lambda extra=(): list(self.saves)),
         ]
+        # An unexpected dialog would block forever: make it fail the test instead (tests patch the ones they expect).
+        for name in ("showerror", "showinfo", "showwarning", "askyesno"):
+            self.patches.append(mock.patch.object(overlay.messagebox, name, side_effect=AssertionError(
+                f"unexpected messagebox.{name}")))
         for p in self.patches:
             p.start()
         self.saves = []
@@ -131,6 +135,39 @@ class ModuleUiTests(unittest.TestCase):
             self.app.notebook.select(0)
             self.pump()
         self.assertEqual(self.app.save.xp, 123456)
+
+    def test_copy_paste_enchantments_with_shortcuts(self):
+        class Key:
+            def __init__(self, keysym, keycode):
+                self.keysym, self.keycode = keysym, keycode
+        sword = self.select("Sword")
+        self.app.ench_vars[0][1].set("3")
+        self.app.commit_item()
+        self.assertEqual(self.app._tree_shortcut(Key("Cyrillic_es", 67)), "break")  # Ctrl+C, Russian layout
+        self.app.save.new_item("Axe", in_chest=True)
+        self.app.refresh_items()
+        axe = self.select("Axe")
+        self.app._tree_shortcut(Key("v", 86))  # Ctrl+V
+        self.assertEqual([(e["id"], e["level"]) for e in axe["enchantments"]],
+                         [(e["id"], e["level"]) for e in sword["enchantments"]])
+        self.assertIsNot(axe["enchantments"], sword["enchantments"])
+        self.assertTrue(self.app.save.dirty)
+
+    def test_paste_refused_on_artifact(self):
+        self.select("Sword")
+        self.app.copy_item_enchantments()
+        artifact = self.select("FireworksArrowItem")
+        with mock.patch.object(self.overlay.messagebox, "showinfo") as info:
+            self.app.paste_item_enchantments()
+        info.assert_called_once()
+        self.assertNotIn("enchantments", artifact)
+
+    def test_bonus_points_add_and_remove(self):
+        self.app.points_target.set("500")
+        self.app._points_bonus()
+        self.assertGreater(self.app.save.bonus_points(), 0)
+        self.app._points_clear_bonus()
+        self.assertEqual(self.app.save.bonus_points(), 0)
 
 
 if __name__ == "__main__":

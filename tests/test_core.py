@@ -248,5 +248,65 @@ class ConfigTests(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class CopyPasteAndBonusTests(unittest.TestCase):
+    def test_copy_paste_enchantments(self):
+        from mcd_loader.savefile import copy_enchantments, paste_enchantments
+        dagger = {"type": "Daggers", "enchantments": [
+            {"id": "Sharpness", "level": 3, "investedPoints": 6}, {"id": "Looting", "level": 0},
+            {"id": "Echo", "level": 0}, {"id": "Unset", "level": 0, "investedPoints": -500}],
+            "netheriteEnchant": {"id": "Leeching", "level": 2}}
+        sword = {"type": "Sword", "enchantments": [{"id": "Chains", "level": 1}]}
+        payload = copy_enchantments(dagger)
+        paste_enchantments(sword, json.loads(json.dumps(payload)))
+        self.assertEqual([(e["id"], e["level"]) for e in sword["enchantments"]],
+                         [("Sharpness", 3), ("Looting", 0), ("Echo", 0), ("Unset", 0)])
+        self.assertEqual(sword["netheriteEnchant"], {"id": "Leeching", "level": 2})
+        self.assertFalse(any(int(e.get("investedPoints") or 0) < 0 for e in sword["enchantments"]))
+        self.assertEqual(sword["enchantments"][0]["investedPoints"], 9)  # gilded cost
+        sword["enchantments"][0]["level"] = 1  # editing the copy leaves the source alone
+        self.assertEqual(dagger["enchantments"][0]["level"], 3)
+
+    def test_bonus_found_and_removed_wherever_it_moved(self):
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "hero.dat")
+            shutil.copy(BLANK, path)
+            s = SaveFile(path)
+            sword = s.new_item("Sword")
+            set_enchantment(sword, 0, "Sharpness", 2)
+            sword["enchantments"][0]["investedPoints"] = -400  # the game moved the bonus here
+            sword["netheriteEnchant"] = {"id": "Looting", "level": 1, "investedPoints": -100}
+            self.assertEqual(s.bonus_points(), 500)
+            s.set_bonus_points(0)
+            self.assertEqual(s.bonus_points(), 0)
+            self.assertEqual(sword["enchantments"][0]["investedPoints"], 5)  # level 2: 1+2, gilded +2
+            self.assertEqual(sword["netheriteEnchant"]["investedPoints"], 1)
+        finally:
+            shutil.rmtree(d)
+
+
+class BonusOnRealItemsTests(unittest.TestCase):
+    def test_bonus_uses_unchosen_option_and_survives_choosing_it(self):
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "hero.dat")
+            shutil.copy(BLANK, path)
+            s = SaveFile(path)
+            sword = {"type": "Sword", "power": 2.0, "rarity": "Common", "equipmentSlot": "MeleeGear",
+                     "enchantments": [{"id": "Sharpness", "level": 0}, {"id": "Looting", "level": 0},
+                                      {"id": "Echo", "level": 1}]}
+            s.inventory.append(sword)
+            s.set_bonus_points(300)  # game items have no Unset entries
+            self.assertEqual(s.bonus_points(), 300)
+            carrier = next(i for i, e in enumerate(sword["enchantments"]) if int(e.get("investedPoints") or 0) < 0)
+            set_enchantment(sword, carrier, sword["enchantments"][carrier]["id"], 2)
+            self.assertEqual(s.bonus_points(), 300)
+            self.assertEqual(len(sword["enchantments"]), 3)
+            s.set_bonus_points(0)
+            self.assertEqual(s.bonus_points(), 0)
+        finally:
+            shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     unittest.main()

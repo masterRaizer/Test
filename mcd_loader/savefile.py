@@ -213,34 +213,44 @@ class SaveFile:
         self.level = max(1, int(free_points) + self.enchantment_points_spent() + 1)
         return self.level
 
-    # Experimental bonus: an empty ("Unset") enchantment option whose investedPoints is negative.
-    # If the game totals investedPoints to know what was spent, this frees that many extra points.
+    # Bonus points: a negative investedPoints on an empty ("Unset") enchantment option. The game
+    # totals investedPoints to know what was spent, so this frees that many extra points.
     def _bonus_carriers(self):
+        """Every enchantment entry with a negative investedPoints, wherever the game moved it."""
         for item in self.all_items():
-            for e in item.get("enchantments") or []:
-                if e.get("id") == gd.UNSET_ENCHANTMENT and int(e.get("investedPoints") or 0) < 0:
-                    yield item, e
+            entries = list(item.get("enchantments") or [])
+            if isinstance(item.get("netheriteEnchant"), dict):
+                entries.append(item["netheriteEnchant"])
+            for e in entries:
+                try:
+                    if int(e.get("investedPoints") or 0) < 0:
+                        yield item, e
+                except (TypeError, ValueError):
+                    continue
 
     def bonus_points(self):
         return sum(-int(e["investedPoints"]) for _item, e in self._bonus_carriers())
 
     def set_bonus_points(self, amount):
-        """Store amount bonus points on one empty enchantment option. Returns the carrier item."""
-        for _item, e in list(self._bonus_carriers()):
-            e["investedPoints"] = 0
+        """Remove any bonus, then store amount bonus points on one empty option. Returns the carrier item."""
+        for item, e in list(self._bonus_carriers()):
+            gilded = item.get("netheriteEnchant") is not None and e is not item.get("netheriteEnchant")
+            e["investedPoints"] = gd.enchantment_cost(e.get("id"), e.get("level"), gilded)
         self.dirty = True
         amount = int(amount)
         if amount <= 0:
             return None
         candidates = sorted(self.inventory, key=lambda i: (i.get("equipmentSlot") != "MeleeGear",
                                                           i.get("equipmentSlot") is None))
-        for item in candidates + list(self.chest):
-            enchants = item.get("enchantments") or []
-            for e in reversed(enchants):
-                if e.get("id") == gd.UNSET_ENCHANTMENT and not e.get("level"):
-                    e["investedPoints"] = -amount
-                    return item
-        raise ValueError("нет предмета с пустой ячейкой зачарования — добавьте оружие или броню")
+        candidates += list(self.chest)
+        # Prefer an empty option; otherwise any option that is not chosen (level 0) holds no points either.
+        for wanted in (lambda e: e.get("id") == gd.UNSET_ENCHANTMENT, lambda e: True):
+            for item in candidates:
+                for e in reversed(item.get("enchantments") or []):
+                    if not e.get("level") and wanted(e):
+                        e["investedPoints"] = -amount
+                        return item
+        raise ValueError("нет предмета с зачарованиями — добавьте оружие или броню")
 
     @staticmethod
     def _next_index(collection):
@@ -357,13 +367,21 @@ def set_enchantment(item, index, enchantment_id, level):
         enchants.append({"id": gd.UNSET_ENCHANTMENT, "level": 0})
     level = max(0, min(3, int(level)))
     ench = enchants[index]
-    bonus = int(ench.get("investedPoints") or 0) if ench.get("id") == gd.UNSET_ENCHANTMENT else 0
+    bonus = min(0, int(ench.get("investedPoints") or 0))  # negative = bonus points carrier
     ench["id"] = enchantment_id or gd.UNSET_ENCHANTMENT
     ench["level"] = level if ench["id"] != gd.UNSET_ENCHANTMENT else 0
     gilded = item.get("netheriteEnchant") is not None
     ench["investedPoints"] = gd.enchantment_cost(ench["id"], ench["level"], gilded)
-    if bonus < 0 and ench["id"] == gd.UNSET_ENCHANTMENT:
-        ench["investedPoints"] = bonus  # keep the bonus points carrier
+    if bonus < 0:
+        if ench["level"] == 0:
+            ench["investedPoints"] = bonus  # still unchosen: keep carrying the bonus
+        else:  # the carrier got chosen: move the bonus to another unchosen option of the item
+            spare = next((e for i, e in enumerate(enchants) if i != index and not e.get("level")
+                          and int(e.get("investedPoints") or 0) >= 0), None)
+            if spare is None:
+                spare = {"id": gd.UNSET_ENCHANTMENT, "level": 0}
+                enchants.append(spare)
+            spare["investedPoints"] = bonus
     # Only one enchantment per slot may be active.
     if ench["level"] > 0:
         base = index - index % 3
@@ -377,7 +395,7 @@ def set_enchantment(item, index, enchantment_id, level):
 def recompute_invested_points(item):
     gilded = item.get("netheriteEnchant") is not None
     for e in item.get("enchantments") or []:
-        if e.get("id") == gd.UNSET_ENCHANTMENT and int(e.get("investedPoints") or 0) < 0:
+        if not e.get("level") and int(e.get("investedPoints") or 0) < 0:
             continue  # bonus points carrier, see SaveFile.set_bonus_points
         e["investedPoints"] = gd.enchantment_cost(e.get("id"), e.get("level"), gilded)
 
@@ -394,6 +412,33 @@ def max_out_enchantments(item):
             set_enchantment(item, i, e["id"], 3)
             changed = True
     return changed
+
+
+CLIP_MARK = "secretgear_enchantments"
+
+
+def copy_enchantments(item):
+    """Clipboard payload with an item's enchantment options, choices and gilding."""
+    return {CLIP_MARK: 1, "type": item.get("type"),
+            "enchantments": [{k: v for k, v in e.items() if not (k == "investedPoints" and int(v or 0) < 0)}
+                             for e in copy.deepcopy(item.get("enchantments") or [])],
+            "netheriteEnchant": copy.deepcopy(item.get("netheriteEnchant"))}
+
+
+def paste_enchantments(item, payload):
+    """Give item the copied enchantments (and gilding, if the source had it). Bonus carriers stay."""
+    bonus = [e for e in item.get("enchantments") or [] if int(e.get("investedPoints") or 0) < 0]
+    item["enchantments"] = copy.deepcopy(payload.get("enchantments") or [])
+    if payload.get("netheriteEnchant"):
+        item["netheriteEnchant"] = copy.deepcopy(payload["netheriteEnchant"])
+    recompute_invested_points(item)
+    for carrier in bonus:  # keep bonus points the target was holding
+        free = [e for e in item["enchantments"] if not e.get("level") and int(e.get("investedPoints") or 0) >= 0]
+        slot = next((e for e in free if e.get("id") == gd.UNSET_ENCHANTMENT), free[0] if free else None)
+        if slot is None:
+            slot = {"id": gd.UNSET_ENCHANTMENT, "level": 0}
+            item["enchantments"].append(slot)
+        slot["investedPoints"] = carrier["investedPoints"]
 
 
 def clear_enchantments(item):
