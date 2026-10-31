@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# A newer push replaces the "latest" release, so an older build must not finish after it.
+concurrency:
+  group: build-exe
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest

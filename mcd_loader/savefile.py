@@ -148,6 +148,26 @@ class SaveFile:
         self.profile["threatLevels"] = threats
         self.dirty = True
 
+    def portal_unlocked(self):
+        """None if the save has no stronghold progress yet, else whether the End portal is unlocked."""
+        progress = self.profile.get("strongholdProgress")
+        keys = [k for k in progress or {} if k.endswith("Unlocked")]
+        if not keys:
+            return None
+        return all(progress[k] for k in keys)
+
+    def unlock_portal(self):
+        """Same as MCDSaveEdit's "Unlock Portal": mark every stronghold "...Unlocked" step done."""
+        progress = self.profile.get("strongholdProgress") or {}
+        changed = False
+        for key in progress:
+            if key.endswith("Unlocked") and not progress[key]:
+                progress[key] = True
+                changed = True
+        if changed:
+            self.dirty = True
+        return changed
+
     # --- items ----------------------------------------------------------
     @property
     def inventory(self):

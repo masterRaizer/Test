@@ -541,6 +541,13 @@ class LoaderApp:
         body = theme.card(left, "Валюта")
         for row, (key, title) in enumerate(gd.CURRENCIES.items()):
             theme.card_row(body, row, title, ttk.Entry(body, textvariable=self.currency_vars[key], width=18))
+        self.portal_var = tk.StringVar()
+        portal = ttk.Frame(body, style="Card.TFrame")
+        portal.grid(row=len(gd.CURRENCIES), column=0, columnspan=2, sticky="we", pady=(6, 0))
+        ttk.Label(portal, textvariable=self.portal_var, style="CardMuted.TLabel").pack(side="left")
+        self.portal_button = shell.CanvasButton(portal, "Открыть портал", self._unlock_portal, primary=False,
+                                                bg=theme.CARD, icon="◈")
+        self.portal_button.pack(side="right")
         body = theme.card(left, "Прогресс")
         theme.card_row(body, 0, "Открытая сложность",
                        ttk.Combobox(body, textvariable=self.difficulty_var, state="readonly", width=24,
@@ -930,8 +937,18 @@ class LoaderApp:
             self._suspend_traces = False
         self.refresh_summary()
 
+    def _unlock_portal(self):
+        if self.save and self.save.unlock_portal():
+            self.refresh_summary()
+            self.status_var.set("Портал в Край открыт. Нажмите «Применить в игре».")
+
     def refresh_summary(self):
         s = self.save
+        portal = s.portal_unlocked()
+        self.portal_var.set({None: "Портал Края: ещё не найден в сохранении", True: "Портал Края: открыт",
+                             False: "Портал Края: закрыт"}[portal])
+        self.portal_button.enabled = portal is False
+        self.portal_button.draw()
         self.power_var.set(f"Сила персонажа: {s.character_power()}")
         left = s.enchantment_points_left()
         bonus = s.bonus_points()

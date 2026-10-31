@@ -178,5 +178,23 @@ class EnchantmentPointsTests(unittest.TestCase):
             self.save.set_bonus_points(10)
 
 
+class PortalTests(unittest.TestCase):
+    def test_unlock_portal(self):
+        d = tempfile.mkdtemp()
+        try:
+            path = os.path.join(d, "hero.dat")
+            shutil.copy(BLANK, path)
+            s = SaveFile(path)
+            self.assertIsNone(s.portal_unlocked())
+            s.profile["strongholdProgress"] = {"FirstUnlocked": True, "SecondUnlocked": False, "Seen": False}
+            self.assertFalse(s.portal_unlocked())
+            self.assertTrue(s.unlock_portal())
+            self.assertTrue(s.portal_unlocked())
+            self.assertFalse(s.profile["strongholdProgress"]["Seen"])
+            self.assertFalse(s.unlock_portal())
+        finally:
+            shutil.rmtree(d)
+
+
 if __name__ == "__main__":
     unittest.main()
