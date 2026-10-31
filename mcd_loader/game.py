@@ -12,6 +12,7 @@ APP_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/.confi
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 BACKUP_DIR = os.path.join(APP_DIR, "backups")
 CACHE_DIR = os.path.join(APP_DIR, "cache")
+LOG_PATH = os.path.join(APP_DIR, "loader.log")
 
 DEFAULT_CONFIG = {
     "hotkey": "F8",
@@ -32,6 +33,14 @@ DEFAULT_CONFIG = {
 # Virtual-key codes for the hotkeys offered in settings.
 VK_CODES = {f"F{i}": 0x6F + i for i in range(1, 13)}
 VK_CODES.update({"Insert": 0x2D, "Home": 0x24, "End": 0x23, "PageUp": 0x21, "PageDown": 0x22})
+
+
+def setup_logging():
+    import logging
+    os.makedirs(APP_DIR, exist_ok=True)
+    logging.basicConfig(filename=LOG_PATH, filemode="w", level=logging.INFO, encoding="utf-8",
+                        format="%(asctime)s %(levelname)s %(message)s")
+    logging.info("MCD Loader start, platform %s", sys.platform)
 
 
 def load_config():

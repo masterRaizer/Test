@@ -105,9 +105,14 @@ python -m mcd_loader items --icons
 
 ## Скачать
 
-Готовый **MCDLoader.exe** лежит в [Releases → latest](https://github.com/masterRaizer/Test/releases/tag/latest).
+Готовый **Launcher.exe** лежит в [Releases → latest](https://github.com/masterRaizer/Test/releases/tag/latest).
 Он собирается автоматически (GitHub Actions, `.github/workflows/build-exe.yml`) после каждого изменения.
 Python не нужен.
+
+При запуске показывается заставка с загрузкой, потом плавно открывается окно. F8 плавно скрывает и показывает его.
+Если файлы игры не нашлись, сверху появится жёлтое предупреждение с кнопкой «Указать папку игры…».
+Можно выбрать любую папку, где установлена игра: `Paks` внутри найдётся сам.
+Подробный лог: `%APPDATA%\MCDLoader\loader.log`.
 
 Файл не подписан, поэтому Windows может показать предупреждение SmartScreen. Чтобы запустить, нажмите «Подробнее» → «Выполнить в любом случае».
 Драйвер для WASD (ViGEmBus) встроен в exe. Загрузчик сам предложит его установить при первом включении мода.
@@ -119,7 +124,7 @@ Python не нужен.
 ```bat
 run.bat            :: запустить оверлей
 run.bat --launch   :: запустить оверлей и игру
-build.bat          :: собрать один файл dist\MCDLoader.exe
+build.bat          :: собрать один файл dist\Launcher.exe
 ```
 
 Или вручную:

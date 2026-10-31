@@ -1,5 +1,6 @@
 """In-game overlay: a topmost editor window toggled by a hotkey over the running game."""
 import json
+import logging
 import os
 import queue
 import shutil
@@ -7,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import catalog as cat_mod, game, gamedata as gd, theme
+from . import catalog as cat_mod, chrome, game, gamedata as gd, theme
 from .pickers import RARITY_COLORS, EnchantmentPicker, IconCache, ItemPicker, ItemTypePicker
 from .wasd import WasdMovement, WasdUnavailable
 from .savefile import (SaveFile, find_saves, item_level, max_out_enchantments,
@@ -32,7 +33,8 @@ class LoaderApp:
     PAGES = [("◉", "Персонаж"), ("▦", "Инвентарь"), ("{ }", "JSON"), ("⚙", "Настройки"), ("✦", "Моды")]
     NAV_ORDER = [0, 1, 4, 2, 3]  # sidebar order: character, inventory, mods, JSON, settings
 
-    def __init__(self, root, cfg, initial_save=None):
+    def __init__(self, root, cfg, initial_save=None, splash=None):
+        step = splash.step if splash else (lambda *a: None)
         self.root = root
         self.cfg = cfg
         self.save = None
@@ -52,11 +54,11 @@ class LoaderApp:
         root.geometry("1320x800")
         root.minsize(1180, 680)
         root.attributes("-topmost", True)
-        try:
-            root.attributes("-alpha", float(cfg.get("overlay_alpha", 0.95)))
-        except tk.TclError:
-            pass
+        self.alpha = float(cfg.get("overlay_alpha", 0.95))
+        self.animator = chrome.Animator(root)
+        chrome.set_window_icon(root)
         theme.apply_theme(root)
+        step("Подготовка интерфейса", 0.15)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-s>", lambda e: self.apply_to_game())
         root.bind("<Escape>", lambda e: self.hide() if self.hotkey.available else None)
@@ -70,22 +72,33 @@ class LoaderApp:
         self.status_var = tk.StringVar(value="Выберите персонажа")
         self.status = ttk.Label(content, textvariable=self.status_var, style="Muted.TLabel")
         self.status.pack(fill="x", pady=(0, 8))
+        self.banner = tk.Frame(content, bg="#2b2617", highlightbackground=theme.WARN, highlightthickness=1)
+        self.banner_text = tk.StringVar()
+        tk.Label(self.banner, textvariable=self.banner_text, bg="#2b2617", fg=theme.WARN, font=theme.FONT,
+                 justify="left", anchor="w", wraplength=760).pack(side="left", fill="x", expand=True, padx=12, pady=8)
+        ttk.Button(self.banner, text="Указать папку игры…", style="Accent.TButton",
+                   command=self.choose_game_folder).pack(side="right", padx=10, pady=6)
         self.notebook = ttk.Notebook(content, style="Hidden.TNotebook")
         self.notebook.pack(fill="both", expand=True)
         self._build_character_tab()
+        step("Инвентарь и зачарования", 0.35)
         self._build_inventory_tab()
         self._build_json_tab()
         self._build_settings_tab()
         self._build_mods_tab()
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        chrome.style_titlebar(root)
 
+        step("Поиск сохранений", 0.55)
         self.refresh_save_list(select=initial_save or cfg.get("last_save"))
+        step("Файлы игры", 0.8)
         self.root.after(50, self._poll_hotkey)
         self.root.after(2000, self._watch_disk)
         self.root.after(100, self._drain_ui_queue)
         self.load_catalog()
         if cfg.get("wasd_enabled"):
             self.root.after(500, lambda: self.set_wasd(True))
+        self.root.after(80, self._highlight_nav)
 
     # ------------------------------------------------------------------ UI
     def _build_header(self):
@@ -117,6 +130,7 @@ class LoaderApp:
                                 command=lambda i=index: self.show_page(i))
             button.pack(fill="x", pady=2)
             self.nav_buttons[index] = button
+        self.nav_indicator = chrome.SlidingIndicator(side, self.animator)
         tk.Frame(parent, bg=theme.BORDER, width=1).pack(side="left", fill="y")
 
     def show_page(self, index):
@@ -126,6 +140,8 @@ class LoaderApp:
         current = self.notebook.index("current")
         for index, button in self.nav_buttons.items():
             button.configure(style="NavActive.TButton" if index == current else "Nav.TButton")
+        if current in self.nav_buttons:
+            self.nav_indicator.move_to(self.nav_buttons[current])
 
     def _labeled(self, parent, row, text, widget):
         ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", pady=4, padx=(0, 12))
@@ -852,6 +868,7 @@ class LoaderApp:
 
     def _preview_alpha(self, _value=None):
         self.alpha_label.configure(text=f"{float(self.set_alpha.get()):.2f}")
+        self.alpha = float(self.set_alpha.get())
         try:
             self.root.attributes("-alpha", float(self.set_alpha.get()))
         except tk.TclError:
@@ -919,18 +936,27 @@ class LoaderApp:
             messagebox.showerror("Запуск игры", str(e), parent=self.root)
 
     def show(self):
+        self._hiding = False
+        self.root.attributes("-alpha", 0.0)
         self.root.deiconify()
         self.root.attributes("-topmost", True)
         self.root.lift()
         self.root.focus_force()
+        chrome.fade(self.animator, self.root, 0.0, self.alpha, 200)
+        self._highlight_nav()
         self._sync_with_disk()
 
     def hide(self):
         self.commit_forms()
-        self.root.withdraw()
+        self._hiding = True
+
+        def done():
+            if self._hiding:
+                self.root.withdraw()
+        chrome.fade(self.animator, self.root, float(self.root.attributes("-alpha")), 0.0, 150, done=done)
 
     def toggle(self):
-        if self.root.state() == "withdrawn":
+        if self.root.state() == "withdrawn" or getattr(self, "_hiding", False):
             self.show()
         else:
             self.hide()
@@ -979,9 +1005,14 @@ class LoaderApp:
     def load_catalog(self, force=False):
         """Read the game's paks in the background: full item list, names and icons."""
         paks_dir = cat_mod.find_paks_dir(self.cfg.get("paks_dir", ""), self.cfg.get("game_path", ""))
+        logging.info("paks dir: %s", paks_dir)
         if not paks_dir:
-            self.catalog_status.set("Файлы игры не найдены — укажите папку …\\Dungeons\\Content\\Paks")
+            self.catalog_status.set("Файлы игры не найдены — укажите папку игры")
+            self.show_banner("Файлы игры не найдены, поэтому нет иконок и полного списка предметов. "
+                             "Укажите папку, куда установлена Minecraft Dungeons (или запустите игру и "
+                             "нажмите «Перечитать файлы игры» в настройках).")
             return
+        self.hide_banner()
         self._icon_thread_stop.set()
         self._icon_thread_stop = threading.Event()
         stop = self._icon_thread_stop
@@ -998,11 +1029,17 @@ class LoaderApp:
                 catalog = cat_mod.GameCatalog.load(paks_dir, cache_dir, [self.cfg.get("pak_key", "")],
                                                    self.cfg.get("language", "ru-RU"))
             except Exception as e:
+                logging.exception("catalog load failed for %s", paks_dir)
                 message = f"Не удалось прочитать файлы игры: {e}"
-                self._ui_queue.put(lambda: self.catalog_status.set(message))
+                self._ui_queue.put(lambda: (self.catalog_status.set(message), self.show_banner(
+                    f"{message}. Подробности — в файле {game.LOG_PATH}")))
                 return
+            logging.info("catalog: %s items, %s enchantments, version %s, language %s", len(catalog.items),
+                         len(catalog.enchantments), catalog.version, catalog.language)
             self._ui_queue.put(lambda: self._on_catalog(catalog))
             catalog.extract_all_icons(stop=stop.is_set)
+            ok, failed, sample = catalog.icon_stats()
+            logging.info("icons: %s ok, %s failed; e.g. %s", ok, failed, sample)
             if not stop.is_set():
                 self._ui_queue.put(self._on_icons_ready)
 
@@ -1026,7 +1063,41 @@ class LoaderApp:
             f"язык {catalog.language or '—'}. Иконки извлекаются…")
         self._refresh_after_catalog()
 
+    def show_banner(self, text):
+        self.banner_text.set(text)
+        if not self.banner.winfo_ismapped():
+            self.banner.pack(fill="x", pady=(0, 10), before=self.notebook)
+
+    def hide_banner(self):
+        self.banner.pack_forget()
+
+    def choose_game_folder(self):
+        path = filedialog.askdirectory(title="Папка с установленной Minecraft Dungeons", parent=self.root)
+        if not path:
+            return
+        self.show_banner(f"Ищу файлы игры в {path}…")
+
+        def work():
+            found = cat_mod.paks_from_install(path) or cat_mod.search_paks(path)
+            logging.info("user folder %s -> %s", path, found)
+            self._ui_queue.put(lambda: self._on_game_folder(path, found))
+        threading.Thread(target=work, daemon=True, name="find-paks").start()
+
+    def _on_game_folder(self, path, found):
+        if not found:
+            self.show_banner(f"В папке {path} не нашлось файлов игры (pakchunk0-….pak). "
+                             "Выберите папку, куда установлена Minecraft Dungeons.")
+            return
+        self.cfg["paks_dir"] = found
+        game.save_config(self.cfg)
+        self.set_paks.set(found)
+        self.load_catalog(force=True)
+
     def _on_icons_ready(self):
+        ok, failed, _sample = self.catalog.icon_stats()
+        if failed and not ok:
+            self.show_banner(f"Список предметов загружен, но иконки извлечь не удалось ({failed} шт.). "
+                             f"Пришлите файл {game.LOG_PATH} — по нему видно причину.")
         self.icons.set_catalog(self.catalog)
         self.catalog_status.set(self.catalog_status.get().replace("Иконки извлекаются…", "Иконки готовы."))
         self._refresh_after_catalog()
@@ -1146,9 +1217,18 @@ class LoaderApp:
 
 
 def run(initial_save=None, launch=None):
+    game.setup_logging()
     cfg = game.load_config()
     root = tk.Tk()
-    app = LoaderApp(root, cfg, initial_save=initial_save)
-    if launch if launch is not None else cfg.get("launch_game"):
-        app.start_game()
+    root.withdraw()
+    from . import __version__
+    splash = chrome.Splash(root, version=f"v{__version__}")
+    splash.step("Запуск", 0.05)
+    app = LoaderApp(root, cfg, initial_save=initial_save, splash=splash)
+
+    def reveal():
+        app.show()
+        if launch if launch is not None else cfg.get("launch_game"):
+            app.start_game()
+    splash.finish(reveal)
     root.mainloop()

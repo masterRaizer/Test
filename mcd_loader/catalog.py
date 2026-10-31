@@ -103,23 +103,135 @@ STRING_KEY_FIXES = {
 }
 
 
+PAK_MARKER = "pakchunk0"
+
+
+def _is_paks_dir(path):
+    try:
+        return os.path.isdir(path) and any(n.lower().startswith(PAK_MARKER) and n.lower().endswith(".pak")
+                                           for n in os.listdir(path))
+    except OSError:
+        return False
+
+
+def paks_from_install(path):
+    """Paks folder for anything inside a game install: Dungeons.exe, the shipping exe or a folder."""
+    if not path:
+        return None
+    path = os.path.normpath(path)
+    if os.path.isfile(path):
+        path = os.path.dirname(path)
+    probe = path
+    for _ in range(6):  # walk up: ...\Dungeons\Binaries\Win64 -> install root
+        for sub in (("Paks",), ("Content", "Paks"), ("Dungeons", "Content", "Paks"),
+                    ("Content", "Dungeons", "Content", "Paks")):
+            cand = os.path.join(probe, *sub)
+            if _is_paks_dir(cand):
+                return cand
+        if _is_paks_dir(probe):
+            return probe
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return None
+
+
+def search_paks(root, max_depth=7):
+    """Look for the game's Paks folder anywhere below root (depth-limited)."""
+    root = os.path.normpath(root)
+    base_depth = root.count(os.sep)
+    for current, dirs, files in os.walk(root):
+        if any(f.lower().startswith(PAK_MARKER) and f.lower().endswith(".pak") for f in files):
+            return current
+        if current.count(os.sep) - base_depth >= max_depth:
+            dirs[:] = []
+        else:
+            dirs[:] = [d for d in dirs if not d.startswith(("$", ".")) and d.lower() not in ("windows", "saved")]
+    return None
+
+
+def running_game_exes():
+    """Full paths of running Minecraft Dungeons processes (Windows only)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)
+    found = []
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(entry)
+    try:
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.szExeFile.lower() in ("dungeons.exe", "dungeons-win64-shipping.exe"):
+                handle = kernel32.OpenProcess(0x1000, False, entry.th32ProcessID)
+                if handle:
+                    buf = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(len(buf))
+                    if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                        found.append(buf.value)
+                    kernel32.CloseHandle(handle)
+            ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snap)
+    return found
+
+
+def steam_libraries():
+    roots = []
+    for pf in filter(None, (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"))):
+        steam = os.path.join(pf, "Steam")
+        roots.append(steam)
+        vdf = os.path.join(steam, "steamapps", "libraryfolders.vdf")
+        try:
+            with open(vdf, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parts = line.strip().split('"')
+                    if len(parts) >= 4 and parts[1].lower() == "path":
+                        roots.append(parts[3].replace("\\\\", "\\"))
+        except OSError:
+            pass
+    return roots
+
+
+def _drives():
+    if os.name != "nt":
+        return []
+    return [f"{c}:\\" for c in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{c}:\\")]
+
+
 def default_paks_dirs(game_path=""):
     dirs = []
-    if game_path:
-        base = os.path.dirname(game_path)
-        dirs += [os.path.join(base, "Dungeons", "Content", "Paks"), os.path.join(base, "Content", "Paks")]
     local = os.environ.get("LOCALAPPDATA")
     if local:
         dirs.append(os.path.join(local, "Mojang", "products", "dungeons", "dungeons", "Dungeons", "Content", "Paks"))
-    for pf in filter(None, (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"))):
-        dirs.append(os.path.join(pf, "Steam", "steamapps", "common", "MinecraftDungeons", "Dungeons", "Content", "Paks"))
-    dirs.append(os.path.join("C:\\", "XboxGames", "Minecraft Dungeons", "Content", "Dungeons", "Content", "Paks"))
+    for lib in steam_libraries():
+        dirs.append(os.path.join(lib, "steamapps", "common", "MinecraftDungeons", "Dungeons", "Content", "Paks"))
+    for drive in _drives():
+        dirs.append(os.path.join(drive, "XboxGames", "Minecraft Dungeons", "Content", "Dungeons", "Content", "Paks"))
+        dirs.append(os.path.join(drive, "Program Files", "Minecraft Dungeons", "Dungeons", "Content", "Paks"))
     return dirs
 
 
 def find_paks_dir(configured="", game_path=""):
-    for d in ([configured] if configured else []) + default_paks_dirs(game_path):
-        if d and os.path.isdir(d) and any(n.lower().endswith(".pak") for n in os.listdir(d)):
+    """Best guess of the Paks folder: settings, the running game, then the usual install places."""
+    for hint in (configured, game_path, *running_game_exes()):
+        found = paks_from_install(hint) if hint else None
+        if found:
+            return found
+    for d in default_paks_dirs(game_path):
+        if _is_paks_dir(d):
             return d
     return None
 
@@ -305,6 +417,25 @@ class GameCatalog:
             with open(failed, "w", encoding="utf-8") as f:
                 f.write(str(e))
             return None
+
+    def icon_stats(self):
+        """(extracted, failed, first failure message) for the icons of this catalog."""
+        ok = failed = 0
+        sample = ""
+        for kind, ids in (("item", self.items), ("enchantment", self.enchantments)):
+            for ident in ids:
+                asset = self._icon_asset(kind, ident)
+                if not asset:
+                    continue
+                target = os.path.join(self.cache_dir, "icons", hashlib.sha1(asset.lower().encode()).hexdigest() + ".png")
+                if os.path.exists(target):
+                    ok += 1
+                elif os.path.exists(target + ".failed"):
+                    failed += 1
+                    if not sample:
+                        with open(target + ".failed", encoding="utf-8") as f:
+                            sample = f"{asset}: {f.read()}"
+        return ok, failed, sample
 
     def extract_all_icons(self, stop=lambda: False):
         for kind, ids in (("enchantment", list(self.enchantments)), ("item", list(self.items))):

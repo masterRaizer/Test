@@ -31,13 +31,17 @@ jobs:
         # importing vgamepad itself needs the driver, which CI runners do not have
         run: python -c "import mcd_loader.overlay, mcd_loader.wasd as w; p = w.driver_installer(); print(p); assert p"
 
-      - name: Build MCDLoader.exe
-        run: python -m PyInstaller --noconfirm --onefile --windowed --name MCDLoader --collect-all vgamepad --hidden-import PIL._tkinter_finder launcher.py
+      - name: Build Launcher.exe
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name Launcher --icon mcd_loader/assets/launcher.ico --collect-data mcd_loader --collect-all vgamepad --hidden-import PIL._tkinter_finder launcher.py
+
+      - name: Check bundled assets
+        shell: bash
+        run: python -c "import sys; d=open('dist/Launcher.exe','rb').read(); [sys.exit('missing ' + n) for n in ('logo.png', 'launcher.ico', 'ViGEmBusSetup_x64.msi') if n.encode() not in d]"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MCDLoader
-          path: dist/MCDLoader.exe
+          name: Launcher
+          path: dist/Launcher.exe
 
       - name: Publish release "latest"
         shell: bash
@@ -45,7 +49,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/MCDLoader.exe \
+          gh release create latest dist/Launcher.exe \
             --target "${{ github.sha }}" \
             --title "MCD Loader — последняя сборка" \
-            --notes "Сборка из коммита ${{ github.sha }}. Скачайте MCDLoader.exe и запустите. Windows может показать предупреждение SmartScreen (файл не подписан): «Подробнее» → «Выполнить в любом случае»."
+            --notes "Сборка из коммита ${{ github.sha }}. Скачайте Launcher.exe и запустите. Windows может показать предупреждение SmartScreen (файл не подписан): «Подробнее» → «Выполнить в любом случае»."
