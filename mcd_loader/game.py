@@ -40,7 +40,7 @@ def setup_logging():
     os.makedirs(APP_DIR, exist_ok=True)
     logging.basicConfig(filename=LOG_PATH, filemode="w", level=logging.INFO, encoding="utf-8",
                         format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("MCD Loader start, platform %s", sys.platform)
+    logging.info("SecretGear start, platform %s", sys.platform)
 
 
 def load_config():

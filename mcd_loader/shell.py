@@ -332,7 +332,7 @@ class LoadingView(tk.Canvas):
         if self._bg:
             self.create_image(0, 0, image=self._bg, anchor="nw")
         self.logo = self.create_image(w / 2, h / 2 - 24, image=self._frames[0] if self._frames else "")
-        self.create_text(w / 2, h / 2 + 46, text=" ".join(self.title), fill="#6c6f7a", font=(SANS, 10, "bold"))
+        self.create_text(w / 2, h / 2 + 46, text=" ".join(self.title.upper()), fill="#6c6f7a", font=(SANS, 10, "bold"))
         self.status_item = self.create_text(w / 2, h / 2 + 76, text=self.status, fill=theme.DIM, font=(SANS, 9))
         if self._job is None:
             self._tick()
@@ -545,4 +545,38 @@ def banner_art(icon_paths, hue=(25, 45, 110)):
         img = img.convert("RGBA")
         img.alpha_composite(dark)
         return ImageEnhance.Contrast(img.convert("RGB")).enhance(1.05)
+    return make
+
+
+def _cover(img, w, h):
+    """Scale and centre-crop an image to exactly w x h."""
+    from PIL import Image
+    scale = max(w / img.width, h / img.height)
+    img = img.resize((max(w, int(img.width * scale + 0.5)), max(h, int(img.height * scale + 0.5))), Image.LANCZOS)
+    x, y = (img.width - w) // 2, (img.height - h) // 2
+    return img.crop((x, y, x + w, y + h))
+
+
+def image_art(path, fallback, shade=0.85, extent=0.75):
+    """Slide/card background from a picture (e.g. Steam art) with a dark left fade for text."""
+    def make(w, h):
+        from PIL import Image, ImageDraw
+        try:
+            with Image.open(path) as src:
+                img = _cover(src.convert("RGB"), w, h)
+        except Exception:
+            return fallback(w, h)
+        if shade:
+            mask = Image.new("L", (w, h), 0)
+            d = ImageDraw.Draw(mask)
+            for x in range(w):
+                d.line([(x, 0), (x, h)], fill=int(255 * shade * max(0.0, 1 - x / (w * extent)) ** 1.2))
+            dark = Image.new("RGB", (w, h), (8, 9, 13))
+            img = Image.composite(dark, img, mask)
+            bottom = Image.new("L", (w, h), 0)
+            bd = ImageDraw.Draw(bottom)
+            for y in range(h):
+                bd.line([(0, y), (w, y)], fill=int(120 * max(0.0, (y - h * 0.55) / (h * 0.45))))
+            img = Image.composite(dark, img, bottom)
+        return img
     return make

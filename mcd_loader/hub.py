@@ -2,15 +2,18 @@
 import glob
 import logging
 import os
+import queue
+import threading
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from . import __version__, catalog as cat_mod, chrome, game, shell, theme
+from . import __version__, art, catalog as cat_mod, chrome, game, shell, theme
 from . import wasd as wasd_mod
 
-BRAND = "LAUNCHER"
-BRAND_SUB = "Игровые модули"
+BRAND = "SecretGear"
+BRAND_SUB = "Игровой лаунчер"
+ART_DIR = os.path.join(game.CACHE_DIR, "art")
 
 # Games shown in the library. "ready" games open their module, "soon" ones are placeholders.
 GAMES = [
@@ -42,6 +45,8 @@ class Hub:
         self.root, self.cfg, self.border = root, cfg, border
         self.initial_save = initial_save
         self.module = None
+        self._queue = queue.Queue()
+        self.art = {g["id"]: art.cached_game_art(g["id"], ART_DIR) for g in GAMES}
         self.animator = chrome.Animator(root)
         self.alpha = float(cfg.get("overlay_alpha", 0.95))
         self._logo_small = chrome.load_logo(root, 40)
@@ -73,6 +78,31 @@ class Hub:
         self.notebook.bind("<<NotebookTabChanged>>", lambda e: self._highlight())
         self._highlight()
         self.root.after(200, self.run_checks)
+        self.root.after(100, self._drain)
+        threading.Thread(target=self._download_art, daemon=True, name="art").start()
+
+    def _drain(self):
+        try:
+            while True:
+                self._queue.get_nowait()()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(150, self._drain)
+
+    def _download_art(self):
+        for g in GAMES:
+            found = art.fetch_game_art(g["id"], ART_DIR)
+            if found != self.art.get(g["id"]):
+                self._queue.put(lambda gid=g["id"], f=found: self._on_art(gid, f))
+
+    def _on_art(self, gid, found):
+        self.art[gid] = found
+        self.carousel.slides = self._slides()
+        self.carousel._images.clear()
+        self.carousel.show(self.carousel.index, animate=False)
+        self._fill_library()
+        self._fill_home_games()
 
     # -------------------------------------------------------------- chrome
     def _build_sidebar(self):
@@ -92,7 +122,7 @@ class Hub:
         logo.pack(side="left")
         names = tk.Frame(brand, bg=theme.WINDOW)
         names.pack(side="left", padx=(10, 0))
-        tk.Label(names, text=BRAND, bg=theme.WINDOW, fg=theme.FG, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tk.Label(names, text=BRAND, bg=theme.WINDOW, fg=theme.FG, font=("Segoe UI", 12, "bold")).pack(anchor="w")
         tk.Label(names, text=BRAND_SUB, bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 9)).pack(anchor="w")
         if self.border:
             for w in (brand, logo, names):
@@ -154,9 +184,11 @@ class Hub:
         slides = []
         for g in GAMES:
             ready = g["status"] == "ready"
+            fallback = shell.banner_art(icons if g["id"] == "mcd" else [], g["hue"])
+            hero = self.art.get(g["id"], {}).get("hero")
             slides.append({
-                "art": shell.banner_art(icons if g["id"] == "mcd" else [], g["hue"]),
-                "logo": self._logo_slide if g["id"] == "mcd" else None,
+                "art": shell.image_art(hero, fallback) if hero else fallback,
+                "logo": self._logo_slide if g["id"] == "mcd" and not hero else None,
                 "title": g["title"], "badge": g.get("badge"), "text": g["text"], "tag": g["tag"],
                 "button": ("▶  Открыть" if ready else "Скоро", lambda gid=g["id"]: self.open_game(gid)),
                 "note": "Модуль загружен" if ready else "",
@@ -183,10 +215,9 @@ class Hub:
                         font=("Segoe UI", 9, "bold"))
         link.pack(side="right")
         link.bind("<Button-1>", lambda e: self.show_page(self.LIBRARY))
-        row = ttk.Frame(left, style="Page.TFrame")
-        row.pack(fill="x")
-        for k, g in enumerate(ready):
-            self._game_card(row, g, small=True).grid(row=0, column=k, sticky="w", padx=(0, 12))
+        self.home_games = ttk.Frame(left, style="Page.TFrame")
+        self.home_games.pack(fill="x")
+        self._fill_home_games()
 
         news = theme.RoundedBox(right, bg=theme.PAGE, outline=theme.BORDER, radius=12, pad=6, fill_height=True,
                                 frame_style="Page.TFrame")
@@ -212,10 +243,18 @@ class Hub:
             tk.Label(e, text=text, bg=theme.CARD, fg=theme.MUTED, font=("Segoe UI", 9), wraplength=200,
                      justify="left").pack(anchor="w")
 
+    def _fill_home_games(self):
+        for w in self.home_games.winfo_children():
+            w.destroy()
+        for k, g in enumerate([g for g in GAMES if g["status"] == "ready"]):
+            self._game_card(self.home_games, g, small=True).grid(row=0, column=k, sticky="w", padx=(0, 12))
+
     # ------------------------------------------------------------- library
     def _card_art(self, g, w, h):
         from PIL import Image, ImageDraw, ImageTk
-        art = shell.banner_art(cached_item_icons() if g["id"] == "mcd" else [], g["hue"])(w, h)
+        fallback = shell.banner_art(cached_item_icons() if g["id"] == "mcd" else [], g["hue"])
+        card = self.art.get(g["id"], {}).get("card") or self.art.get(g["id"], {}).get("hero")
+        art = (shell.image_art(card, fallback, shade=0) if card else fallback)(w, h)
         mask = Image.new("L", (w, h), 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=10, fill=255)
         base = Image.new("RGB", (w, h), shell._rgb(theme.CARD))
@@ -232,7 +271,10 @@ class Hub:
         photo = self._card_art(g, w, h)
         canvas.create_image(0, 0, image=photo, anchor="nw")
         canvas.image = photo
-        if g["id"] == "mcd" and self._logo_small:
+        has_art = bool(self.art.get(g["id"]))
+        if has_art:
+            pass  # the official capsule already carries the game's logo
+        elif g["id"] == "mcd" and self._logo_small:
             canvas.create_image(12, 12, image=self._logo_small, anchor="nw")
         else:
             theme.rounded_rect(canvas, 12, 12, 52, 52, 9, fill="#2b1d10", outline="")
@@ -260,10 +302,15 @@ class Hub:
 
     def _build_library(self):
         tab = self._page("Библиотека")
-        grid = ttk.Frame(tab, style="Page.TFrame")
-        grid.pack(fill="x")
+        self.library = ttk.Frame(tab, style="Page.TFrame")
+        self.library.pack(fill="x")
+        self._fill_library()
+
+    def _fill_library(self):
+        for w in self.library.winfo_children():
+            w.destroy()
         for k, g in enumerate(GAMES):
-            self._game_card(grid, g).grid(row=k // 3, column=k % 3, sticky="nw", padx=(0, 16), pady=(0, 16))
+            self._game_card(self.library, g).grid(row=k // 3, column=k % 3, sticky="nw", padx=(0, 16), pady=(0, 16))
 
     # -------------------------------------------------------------- system
     def _build_system(self):
@@ -439,7 +486,7 @@ def run(initial_save=None, launch=None):
     cfg = game.load_config()
     root = tk.Tk()
     root.configure(bg=theme.WINDOW)
-    root.title("Launcher")
+    root.title(BRAND)
     chrome.set_window_icon(root)
     theme.apply_theme(root)
     root.attributes("-topmost", True)

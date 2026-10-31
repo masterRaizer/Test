@@ -63,7 +63,7 @@ class LoaderApp:
         self._icon_thread_stop = threading.Event()
         self._ui_queue = queue.Queue()  # callables from worker threads, run on the Tk thread
 
-        root.title("MCD Loader — Minecraft Dungeons")
+        root.title("SecretGear — Minecraft Dungeons")
         root.attributes("-topmost", True)
         self.alpha = float(cfg.get("overlay_alpha", 0.95))
         self.animator = chrome.Animator(root)
@@ -162,7 +162,7 @@ class LoaderApp:
         names.pack(side="left", padx=(10, 0))
         tk.Label(names, text="Minecraft Dungeons", bg=theme.WINDOW, fg=theme.FG, font=("Segoe UI", 10, "bold")).pack(
             anchor="w")
-        tk.Label(names, text="Модуль лаунчера", bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 9)).pack(anchor="w")
+        tk.Label(names, text="Модуль SecretGear", bg=theme.WINDOW, fg=theme.DIM, font=("Segoe UI", 9)).pack(anchor="w")
         if self.border:
             for w in (brand, logo, names):
                 self.border.drag_handle(w)
@@ -280,8 +280,13 @@ class LoaderApp:
 
     def _home_slides(self):
         icon_paths = self._showcase_icons()
+        from . import art
+        hero = art.cached_game_art("mcd", os.path.join(game.CACHE_DIR, "art")).get("hero")
+        first = shell.banner_art(icon_paths, (24, 52, 120))
+        if hero:
+            first = shell.image_art(hero, first)
         return [
-            {"art": shell.banner_art(icon_paths, (24, 52, 120)), "logo": self._slide_logo, "title": "Minecraft Dungeons",
+            {"art": first, "logo": None if hero else self._slide_logo, "title": "Minecraft Dungeons",
              "badge": "MOD", "text": "Редактор сохранений, все предметы игры и ходьба на WASD — прямо поверх игры.",
              "tag": f"{self.cfg.get('hotkey', 'F8')} — открыть поверх игры",
              "button": ("▶  Играть", self.launch_with_animation), "note": "Запуск через лаунчер"},
