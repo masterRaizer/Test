@@ -29,7 +29,22 @@ def stick_from_keys(up, left, down, right, slow=False):
 
 
 class WasdUnavailable(Exception):
-    pass
+    def __init__(self, message, installer=None):
+        super().__init__(message)
+        self.installer = installer  # ViGEmBus .msi that can fix the problem, if found
+
+
+def driver_installer():
+    """Path of the ViGEmBus installer shipped inside the vgamepad package (None if absent)."""
+    import importlib.util
+    import platform
+    spec = importlib.util.find_spec("vgamepad")
+    if not spec or not spec.submodule_search_locations:
+        return None
+    arch = "x64" if platform.machine().endswith("64") else "x86"
+    path = os.path.join(list(spec.submodule_search_locations)[0], "win", "vigem", "install", arch,
+                        f"ViGEmBusSetup_{arch}.msi")
+    return path if os.path.isfile(path) else None
 
 
 def _foreground_process_name(user32, kernel32):
@@ -80,8 +95,8 @@ class WasdMovement:
             pad = vgamepad.VX360Gamepad()
         except Exception as e:
             raise WasdUnavailable(
-                "Не удалось создать виртуальный геймпад. Установите драйвер ViGEmBus "
-                "(ставится вместе с vgamepad) и перезапустите загрузчик.") from e
+                "Не удалось создать виртуальный геймпад: не установлен драйвер ViGEmBus.",
+                installer=driver_installer()) from e
         self._stop.clear()
         self.error = None
         self._thread = threading.Thread(target=self._run, args=(pad,), daemon=True, name="wasd")

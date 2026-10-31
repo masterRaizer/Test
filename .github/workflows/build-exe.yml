@@ -1,0 +1,50 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [ccr-0d25fca9-vg5vzp]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      # vgamepad's setup.py would otherwise open the ViGEmBus installer and hang the build.
+      VGAMEPAD_SKIP_VIGEMBUS_INSTALL: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Check imports
+        run: python -c "import mcd_loader.overlay, mcd_loader.wasd, vgamepad; print(mcd_loader.wasd.driver_installer())"
+
+      - name: Build MCDLoader.exe
+        run: python -m PyInstaller --noconfirm --onefile --windowed --name MCDLoader --collect-all vgamepad --hidden-import PIL._tkinter_finder launcher.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MCDLoader
+          path: dist/MCDLoader.exe
+
+      - name: Publish release "latest"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/MCDLoader.exe \
+            --target "${{ github.sha }}" \
+            --title "MCD Loader — последняя сборка" \
+            --notes "Сборка из коммита ${{ github.sha }}. Скачайте MCDLoader.exe и запустите. Windows может показать предупреждение SmartScreen (файл не подписан): «Подробнее» → «Выполнить в любом случае»."

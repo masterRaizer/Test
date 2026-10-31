@@ -1120,6 +1120,13 @@ class LoaderApp:
             except WasdUnavailable as e:
                 self.set_wasd_on.set(False)
                 self.wasd_status.set(f"Не включено: {e}")
+                if e.installer and messagebox.askyesno(
+                        "Драйвер геймпада",
+                        "Для ходьбы на WASD нужен драйвер ViGEmBus (виртуальный геймпад).\n"
+                        "Установить его сейчас? Windows попросит права администратора.\n\n"
+                        "После установки снова включите «Ходьба на WASD».", parent=self.root):
+                    os.startfile(e.installer)  # noqa: S606 - runs the bundled msi via msiexec
+                    self.wasd_status.set("Идёт установка драйвера ViGEmBus. После неё включите мод снова.")
                 return
             self.wasd_status.set("Включено. В окне игры W/A/S/D двигают персонажа (через виртуальный геймпад). "
                                  "Мышь по-прежнему атакует и целится.")
